@@ -5,6 +5,7 @@ import {
   createAiTrier2,
   createAiVtex,
   createAiVannon,
+  createAiVannon2,
   createAiVetor,
   createDefaultAi,
   listManagedAiInstallations,
@@ -927,6 +928,21 @@ export async function syncAiTemplatesController(req, res) {
     message:
       'A sincronizacao por arquivos locais foi desativada. O banco e a unica fonte de verdade para templates.',
   });
+}
+
+export async function createAiVannon2Controller(req, res) {
+  try {
+    const { instance, username, password, name, clientEndpoint, apiKey, code, cepLoja, clientName, requestedBy } = req.body;
+    const missing = !instance ? 'instance' : !name ? 'name' : !clientName ? 'clientName' : !clientEndpoint ? 'clientEndpoint' : !cepLoja ? 'cepLoja' : !apiKey ? 'apiKey' : '';
+    if (missing) return res.status(400).json({ message: `O campo "${missing}" é obrigatório` });
+
+    const result = await createAiVannon2({ instance, username, password, code2fa: code, name, clientEndpoint, clientName, apiKey, cepLoja });
+    await createLogService(requestedBy || username || 'Sistema', `Criou a IA Vannon 2.0 - ${name}`, instance);
+    return res.status(200).json(result);
+  } catch (error) {
+    const details = toReadableError(error);
+    return res.status(500).json({ message: `Ocorreu um erro ao criar a IA Vannon 2.0. ${details}`, error: details });
+  }
 }
 
 export async function createAiTrier2Controller(req, res) {

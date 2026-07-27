@@ -428,6 +428,55 @@ const MANAGED_AI_PROVIDER_DEFINITIONS = {
       );
     },
   },
+  vannon2: {
+    provider: 'vannon2',
+    displayName: 'IA - Vannon 2.0',
+    templateName: 'IA - Vannon 2.0 Integrada',
+    fallbackVersion: 1,
+    templatePaths: {
+      assistant: 'ia/vannon2/vannon2_ia_config.json',
+      // Os fluxos de produto consolidados da Vannon continuam compatíveis e
+      // são reutilizados até que a nova automação de imagem seja fornecida.
+      preProcess: 'ia/vannon/pre_processamento.json',
+      buscaProdutos: 'ia/vannon/busca_produtos.json',
+      downloadImagem: 'ia/vannon/download_de_imagens_IA_Vannon.json',
+      transferirHumano: 'ia/vannon2/vannon2_transferir_humano.json',
+      ura: 'ia/vannon2/vannon2_ura.json',
+      uraAb: 'ia/alpha2/alpha2_ura_ab.json',
+    },
+    installOrder: ['preProcess', 'downloadImagem', 'buscaProdutos', 'transferirHumano', 'ura', 'uraAb'],
+    updateOrder: ['preProcess', 'downloadImagem', 'buscaProdutos', 'transferirHumano'],
+    createConfigSnapshot(input = {}) {
+      return {
+        assistantDisplayName: input.name ?? '',
+        clientName: input.clientName ?? '',
+        clientEndpoint: input.clientEndpoint ?? '',
+        apiKey: input.apiKey ?? '',
+        cepLoja: input.cepLoja ?? '',
+      };
+    },
+    buildTemplateVariables({ instance, assistantId, config = {}, ids = {} }) {
+      return {
+        id: assistantId,
+        ia_id: assistantId,
+        signaturename: config.assistantDisplayName || 'Vannon',
+        nome_cliente: config.clientName || '',
+        cliente_var: config.clientName || '',
+        endpoint_var: normalizeBaseUrl(instance),
+        api_var: config.apiKey || '',
+        client_endpoint_var: getDominio(config.clientEndpoint || ''),
+        cep_var: config.cepLoja || '',
+        preAutomationId: ids.preProcessId || '',
+        busca_produtos_id: ids.buscaProdutosId || '',
+        transfere_atendimento_id: ids.transferirHumanoId || '',
+        download_image_id: ids.downloadImagemId || '',
+        ura_ia_id: ids.uraIaId || '',
+      };
+    },
+    canUpdateInstallation(record = {}) {
+      return Boolean(record.assistantId && record.preProcessId && record.buscaProdutosId && record.downloadImagemId && record.transferirHumanoId && record.uraIaId && record.uraAbId && record.configSnapshot?.clientName && record.configSnapshot?.clientEndpoint && record.configSnapshot?.apiKey && record.configSnapshot?.cepLoja);
+    },
+  },
   vetor: {
     provider: 'vetor',
     displayName: 'IA - Vetor',

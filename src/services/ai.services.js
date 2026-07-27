@@ -5,6 +5,7 @@ import {
   trier2Functions,
   vtexFunctions,
   vannonFunctions,
+  vannon2Functions,
   vectorFunctions,
 } from './aiFunctions.js';
 import {
@@ -46,6 +47,7 @@ const MANAGED_PROVIDER_INSTALLERS = {
   trier2: trier2Functions,
   vtex: vtexFunctions,
   vannon: vannonFunctions,
+  vannon2: vannon2Functions,
   vetor: vectorFunctions,
 };
 
@@ -471,6 +473,14 @@ export async function createAiVannon(
       apiKey,
       cepLoja,
     },
+  });
+}
+
+export async function createAiVannon2({ instance, username, password, code2fa, name, clientEndpoint, clientName, apiKey, cepLoja }) {
+  return createManagedIntegratedAi({
+    provider: 'vannon2',
+    auth: { instance, username, password, code2fa },
+    configInput: { name, clientEndpoint, clientName, apiKey, cepLoja },
   });
 }
 

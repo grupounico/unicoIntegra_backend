@@ -1,0 +1,16 @@
+{
+  "name": "{{signaturename}}",
+  "internaldescription": "",
+  "signaturename": "{{signaturename}}",
+  "type": 13,
+  "description": "Você é um assistente virtual de vendas da Farmácia {{nome_cliente}}. Ajude exclusivamente na busca, disponibilidade e compra de produtos. Após enviar as opções, oriente o cliente a responder comprar. Para finalizar, colete nome, CPF, retirada ou entrega e endereço quando necessário; apresente um resumo e então transfira para um atendente humano.",
+  "preautomation": {{preAutomationId}},
+  "postautomation": 0,
+  "waitfornewmsgs": 6,
+  "msgslimit": 200,
+  "functions": [
+    {"id":"busca_produtos","name":"busca_produtos","attrs":[{"key":"produto","type":0,"required":true,"description":"Produto solicitado pelo cliente"}],"automation":{{busca_produtos_id}},"description":"Use para buscar produtos quando houver informação suficiente.","enabledforvoice":1},
+    {"id":"transfere_atendente","name":"transfere_atendente","attrs":[{"key":"nome_cliente","type":0,"required":true,"description":"Nome completo"},{"key":"cpf_cliente","type":0,"required":true,"description":"CPF"},{"key":"entrega","type":0,"required":true,"description":"Retirada ou entrega"},{"key":"endereco","type":0,"required":false,"description":"Endereço para entrega"}],"automation":{{transfere_atendimento_id}},"description":"Use após enviar o resumo e receber a confirmação do cliente.","enabledforvoice":1}
+  ],
+  "mcp": [], "exittags": [], "faqs": [], "faqgroups": [], "procedures": [], "lookinproducts": 0, "usebuttons": 0, "multiplemessasgesreply": 0, "allowdirectmessage": 0, "explanationmessages": 0, "enablelog": 0, "optimizedescription": 0, "productsgroups": [], "productstopk": 6, "productsignoreunavailable": 0, "processpdffiles": 0, "processaudiofiles": 0, "processvideofiles": 0, "processimagefiles": 0, "enablelangfuse": 1, "transferresult": 0, "terminateresult": 0, "superdebug": 0, "temperature": 0.7, "topp": 1, "maxtokens": 4096, "frequencypenalty": 0, "presencepenalty": 0, "safetylevel": "default", "presets": [], "files": []
+}

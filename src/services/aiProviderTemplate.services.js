@@ -208,7 +208,9 @@ async function createNextProviderTemplateVersion(provider, nextRow) {
         "uraAbTemplate",
         "componentVersions",
         "isCurrent",
-        "isActive"
+        "isActive",
+        "createdAt",
+        "updatedAt"
       )
       VALUES (
         $1::varchar(50),
@@ -224,7 +226,9 @@ async function createNextProviderTemplateVersion(provider, nextRow) {
         $11::text,
         $12::jsonb,
         true,
-        true
+        true,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
       )
       RETURNING *;
     `,
