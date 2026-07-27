@@ -27,6 +27,9 @@ router.options('/create-ai/vtex', (req, res) => {
 router.options('/create-ai/vannon', (req, res) => {
   res.sendStatus(204);
 });
+router.options('/create-ai/vannon2', (req, res) => {
+  res.sendStatus(204);
+});
 
 router.options('/create-ai/vetor', (req, res) => {
   res.sendStatus(204);
@@ -42,6 +45,7 @@ router.post('/create-ai/trier', aiController.createAiTrierController);
 router.post('/create-ai/trier2', aiController.createAiTrier2Controller);
 router.post('/create-ai/vtex', aiController.createAiVtexController);
 router.post('/create-ai/vannon', aiController.createAiVannonController);
+router.post('/create-ai/vannon2', aiController.createAiVannon2Controller);
 router.post('/create-ai/vetor', aiController.createAiVetorController);
 
 router.post('/create-ai', aiController.createAiController);

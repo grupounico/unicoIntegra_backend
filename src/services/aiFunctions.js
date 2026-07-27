@@ -167,6 +167,10 @@ export async function trier2Functions({ instance, token, iaId, configSnapshot })
   return installManagedProviderTemplates({ provider: 'trier2', instance, token, assistantId: iaId, configSnapshot });
 }
 
+export async function vannon2Functions({ instance, token, iaId, configSnapshot }) {
+  return installManagedProviderTemplates({ provider: 'vannon2', instance, token, assistantId: iaId, configSnapshot });
+}
+
 export async function vtexFunctions({
   instance,
   token,
