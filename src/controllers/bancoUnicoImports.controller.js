@@ -9,6 +9,7 @@ import {
   listBancoUnicoImportJobs,
   pauseBancoUnicoImportJob,
   resumeBancoUnicoImportJob,
+  retryBancoUnicoImportJob,
   subscribeBancoUnicoImportStream,
 } from '../services/bancoUnicoImports.service.js';
 
@@ -149,6 +150,19 @@ export async function resumeBancoUnicoImportJobController(req, res) {
     console.error(error);
     return res.status(resolveStatusCode(error, 409)).json({
       error: error.message || 'Erro ao retomar importacao.',
+    });
+  }
+}
+
+export async function retryBancoUnicoImportJobController(req, res) {
+  try {
+    const username = String(req.body?.username || 'Sistema');
+    const job = await retryBancoUnicoImportJob(req.params.id, username);
+    return res.status(202).json(job);
+  } catch (error) {
+    console.error(error);
+    return res.status(resolveStatusCode(error, 409)).json({
+      error: error.message || 'Erro ao repetir importacao.',
     });
   }
 }

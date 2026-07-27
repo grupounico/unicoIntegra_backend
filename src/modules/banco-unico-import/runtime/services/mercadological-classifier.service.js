@@ -164,11 +164,13 @@ export class MercadologicalClassifierService {
     openAiClient,
     candidateLimit = Number(process.env.MERCADOLOGICAL_AI_CANDIDATE_LIMIT || 25),
     model = process.env.MERCADOLOGICAL_AI_MODEL || "gpt-4.1-mini",
+    timeoutMs = Number(process.env.MERCADOLOGICAL_AI_TIMEOUT_MS || 30000),
   } = {}) {
     this.treeService = treeService || new MercadologicalTreeService();
     this.openAiClient = openAiClient || null;
     this.candidateLimit = Math.max(5, candidateLimit);
     this.model = model;
+    this.timeoutMs = Math.max(1000, timeoutMs);
   }
 
   isAiEnabled(disableAi = false) {
@@ -323,6 +325,8 @@ export class MercadologicalClassifierService {
           ],
         },
       ],
+    }, {
+      timeout: this.timeoutMs,
     });
 
     return extractJson(response.output_text);

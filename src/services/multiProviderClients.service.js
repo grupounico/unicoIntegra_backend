@@ -82,6 +82,37 @@ export function buildMultiProviderClientRequest(client) {
     };
   }
 
+  if (client.provider === 'automatiza') {
+    return {
+      path: '/api/admin/clientes/automatiza',
+      body: {
+        name: client.name,
+        host: client.instance,
+        port: client.alpha7Port || 3306,
+        database: client.alpha7Database,
+        user: client.alpha7User,
+        password: client.credential,
+        shopId: client.automatizaShopId,
+        ssl: false,
+      },
+    };
+  }
+
+  if (client.provider === 'deliverypharmacy') {
+    if (!client.credential || !client.deliveryCompanyId || !client.deliveryErpId) {
+      throw createError('Informe token, Empresa ID e ERP ID da Delivery Pharmacy.', 400);
+    }
+    return {
+      path: '/api/admin/clientes/deliverypharmacy',
+      body: {
+        name: client.name,
+        deliveryToken: client.credential,
+        empresaId: client.deliveryCompanyId,
+        erpId: client.deliveryErpId,
+      },
+    };
+  }
+
   return null;
 }
 

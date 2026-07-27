@@ -136,6 +136,9 @@ model Client {
   alpha7Database  String?                @db.VarChar(255)
   alpha7User      String?                @db.VarChar(255)
   alpha7Schema    String?                @default("public") @db.VarChar(100)
+  automatizaShopId Int?
+  deliveryCompanyId String?              @db.VarChar(100)
+  deliveryErpId     String?              @db.VarChar(100)
   createdAt       DateTime               @default(now()) @db.Timestamp(6)
   updatedAt       DateTime               @updatedAt @db.Timestamp(6)
   importJobs      BancoUnicoImportJob[]
@@ -172,6 +175,8 @@ model BancoUnicoImportJob {
   totalPublished    Int                    @default(0)
   options           Json?
   summary           Json?
+  workerId          String?                @db.VarChar(255)
+  workerHeartbeatAt DateTime?              @db.Timestamp(6)
   startedAt         DateTime?              @db.Timestamp(6)
   finishedAt        DateTime?              @db.Timestamp(6)
   createdAt         DateTime               @default(now()) @db.Timestamp(6)
@@ -185,6 +190,7 @@ model BancoUnicoImportJob {
   @@index([clientName])
   @@index([clientId])
   @@index([status])
+  @@index([workerHeartbeatAt])
   @@index([createdAt])
 }
 

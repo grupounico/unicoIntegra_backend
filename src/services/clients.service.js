@@ -6,7 +6,7 @@ import {
   regenerateMultiProviderApiKey,
 } from './multiProviderClients.service.js';
 
-const PROVIDERS = new Set(['api', 'file', 'alpha7', 'vetor']);
+const PROVIDERS = new Set(['api', 'file', 'alpha7', 'vetor', 'automatiza', 'deliverypharmacy']);
 const DEFAULT_TRIER_API_URL =
   'https://api-sgf-gateway.triersistemas.com.br/sgfpod1/rest/integracao/produto/obter-todos-v1';
 
@@ -35,6 +35,9 @@ function formatClient(client) {
     alpha7Database: client.alpha7Database,
     alpha7User: client.alpha7User,
     alpha7Schema: client.alpha7Schema,
+    automatizaShopId: client.automatizaShopId,
+    deliveryCompanyId: client.deliveryCompanyId,
+    deliveryErpId: client.deliveryErpId,
     createdAt: client.createdAt,
     updatedAt: client.updatedAt,
   };
@@ -179,7 +182,7 @@ export async function createClient(payload) {
 
   const provider = PROVIDERS.has(payload.provider) ? payload.provider : null;
   if (!provider) {
-    throw new Error('Informe um provedor valido (api, file ou alpha7).');
+    throw new Error('Informe um provedor valido.');
   }
 
   const rawInstance = String(payload.instance || '').trim();
@@ -187,21 +190,27 @@ export async function createClient(payload) {
   if (!clientInstance) {
     throw new Error('Informe a instancia de identificacao do cliente.');
   }
-  const instance = provider === 'api' ? DEFAULT_TRIER_API_URL : rawInstance;
-  if (provider !== 'api' && !instance) {
+  const instance = provider === 'api' ? DEFAULT_TRIER_API_URL : provider === 'deliverypharmacy' ? 'https://api.deliverypharmacy.com.br/v2/produto' : rawInstance;
+  if (provider !== 'api' && provider !== 'deliverypharmacy' && !instance) {
     throw new Error('Informe a configuracao tecnica do provedor.');
   }
 
   if (provider === 'vetor' && !String(payload.credential || '').trim()) {
     throw new Error('Informe o token Vetor para criar a integracao.');
   }
-  if (provider === 'alpha7') {
+  if (provider === 'alpha7' || provider === 'automatiza') {
     const alpha7Database = String(payload.alpha7Database || '').trim();
     const alpha7User = String(payload.alpha7User || '').trim();
     const alpha7Password = String(payload.credential || '').trim();
     if (!alpha7Database || !alpha7User || !alpha7Password) {
-      throw new Error('Informe database, usuario e senha quando o provedor for Alpha 7.');
+      throw new Error(`Informe database, usuario e senha quando o provedor for ${provider === 'automatiza' ? 'Automatiza' : 'Alpha 7'}.`);
     }
+  }
+  if (provider === 'deliverypharmacy' && (!String(payload.credential || '').trim() || !String(payload.deliveryCompanyId || '').trim() || !String(payload.deliveryErpId || '').trim())) {
+    throw new Error('Informe token, Empresa ID e ERP ID da Delivery Pharmacy.');
+  }
+  if (provider === 'automatiza' && (!Number.isInteger(Number(payload.automatizaShopId)) || Number(payload.automatizaShopId) <= 0)) {
+    throw new Error('Informe um shopId valido quando o provedor for Automatiza.');
   }
 
   const existing = await prisma.client.findUnique({ where: { name } });
@@ -215,9 +224,12 @@ export async function createClient(payload) {
     provider,
     instance,
     credential: sourceCredential,
-    alpha7Port: provider === 'alpha7' ? Number(payload.alpha7Port) || 5432 : null,
-    alpha7Database: provider === 'alpha7' ? String(payload.alpha7Database || '').trim() : null,
-    alpha7User: provider === 'alpha7' ? String(payload.alpha7User || '').trim() : null,
+    alpha7Port: provider === 'alpha7' || provider === 'automatiza' ? Number(payload.alpha7Port) || (provider === 'automatiza' ? 3306 : 5432) : null,
+    alpha7Database: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7Database || '').trim() : null,
+    alpha7User: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7User || '').trim() : null,
+    automatizaShopId: provider === 'automatiza' ? Number(payload.automatizaShopId) : null,
+    deliveryCompanyId: provider === 'deliverypharmacy' ? String(payload.deliveryCompanyId).trim() : null,
+    deliveryErpId: provider === 'deliverypharmacy' ? String(payload.deliveryErpId).trim() : null,
   });
 
   const client = await prisma.client.create({
@@ -231,11 +243,14 @@ export async function createClient(payload) {
       credential: sourceCredential,
       multiProviderTenantId: multiProvider?.tenantId || null,
       multiProviderApiKey: multiProvider?.apiKey || null,
-      alpha7Port: provider === 'alpha7' ? Number(payload.alpha7Port) || 5432 : null,
-      alpha7Database: provider === 'alpha7' ? String(payload.alpha7Database || '').trim() : null,
-      alpha7User: provider === 'alpha7' ? String(payload.alpha7User || '').trim() : null,
+      alpha7Port: provider === 'alpha7' || provider === 'automatiza' ? Number(payload.alpha7Port) || (provider === 'automatiza' ? 3306 : 5432) : null,
+      alpha7Database: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7Database || '').trim() : null,
+      alpha7User: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7User || '').trim() : null,
       alpha7Schema:
         provider === 'alpha7' ? String(payload.alpha7Schema || 'public').trim() || 'public' : null,
+      automatizaShopId: provider === 'automatiza' ? Number(payload.automatizaShopId) : null,
+      deliveryCompanyId: provider === 'deliverypharmacy' ? String(payload.deliveryCompanyId).trim() : null,
+      deliveryErpId: provider === 'deliverypharmacy' ? String(payload.deliveryErpId).trim() : null,
     },
   });
 
@@ -269,7 +284,7 @@ export async function updateClient(id, payload) {
 
   if (payload.provider !== undefined) {
     const provider = PROVIDERS.has(payload.provider) ? payload.provider : null;
-    if (!provider) throw new Error('Informe um provedor valido (api, file ou alpha7).');
+    if (!provider) throw new Error('Informe um provedor valido.');
     data.provider = provider;
   }
 
@@ -313,6 +328,14 @@ export async function updateClient(id, payload) {
     data.alpha7Database = null;
     data.alpha7User = null;
     data.alpha7Schema = null;
+  }
+
+  if (provider === 'deliverypharmacy') {
+    if (payload.deliveryCompanyId !== undefined) data.deliveryCompanyId = String(payload.deliveryCompanyId).trim() || null;
+    if (payload.deliveryErpId !== undefined) data.deliveryErpId = String(payload.deliveryErpId).trim() || null;
+  } else {
+    data.deliveryCompanyId = null;
+    data.deliveryErpId = null;
   }
 
   if (Object.keys(data).length === 0) {

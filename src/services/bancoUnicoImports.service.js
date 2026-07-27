@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Prisma } from '@prisma/client';
@@ -7,10 +8,12 @@ import { createLogService } from './logs.services.js';
 import { getClientWithCredential } from './clients.service.js';
 import { BancoUnicoClient } from '../modules/banco-unico-import/runtime/services/banco-unico.client.js';
 import { Alpha7ProductsClient } from '../modules/banco-unico-import/runtime/services/alpha7-products.client.js';
+import { AutomatizaProductsClient } from '../modules/banco-unico-import/runtime/services/automatiza-products.client.js';
 import { MercadologicalClassifierService } from '../modules/banco-unico-import/runtime/services/mercadological-classifier.service.js';
 import { MercadologicalTreeService } from '../modules/banco-unico-import/runtime/services/mercadological-tree.service.js';
 import { TrierProductsClient } from '../modules/banco-unico-import/runtime/services/trier-products.client.js';
 import { VetorProductsClient } from '../modules/banco-unico-import/runtime/services/vetor-products.client.js';
+import { DeliveryPharmacyProductsClient } from '../modules/banco-unico-import/runtime/services/delivery-pharmacy-products.client.js';
 import {
   isValidEan,
   normalizeEan,
@@ -35,9 +38,11 @@ const DEFAULT_SOURCE_API_URL =
   'https://api-sgf-gateway.triersistemas.com.br/sgfpod1/rest/integracao/produto/obter-todos-v1';
 const ACTIVE_JOBS = new Map();
 const STREAM_SUBSCRIBERS = new Map();
-const RECOVERABLE_JOB_STATUSES = ['pending', 'running', 'cancelling'];
+const RECOVERABLE_JOB_STATUSES = ['pending', 'claimed', 'processing', 'running', 'cancelling'];
 const ACTIVE_OR_PAUSED_JOB_STATUSES = [...RECOVERABLE_JOB_STATUSES, 'paused'];
 const WORKER_POLL_INTERVAL_MS = 15000;
+const WORKER_LEASE_MS = 60_000;
+const WORKER_ID = `${os.hostname()}:${process.pid}`;
 let workerInitialized = false;
 
 class ImportCancelledError extends Error {
@@ -190,9 +195,14 @@ async function emitEvent(jobId, message, level = 'info', data = null) {
 }
 
 async function updateJob(jobId, data) {
+  const activeJob = ACTIVE_JOBS.get(Number(jobId));
+  const nextData =
+    activeJob?.workerId === WORKER_ID
+      ? { ...data, workerHeartbeatAt: new Date() }
+      : data;
   const updatedJob = await prisma.bancoUnicoImportJob.update({
     where: { id: jobId },
-    data,
+    data: nextData,
     select: jobSelect(),
   });
   publishStreamEvent(jobId, 'job', formatJob(updatedJob));
@@ -473,7 +483,7 @@ async function mapWithConcurrency(items, concurrency, iteratee, jobId) {
   return results;
 }
 
-async function lookupExistingEans(products, client, options, jobId) {
+async function lookupExistingEans(products, client, options, jobId, onProgress) {
   const eans = [
     ...new Set(
       products
@@ -483,6 +493,10 @@ async function lookupExistingEans(products, client, options, jobId) {
   ];
 
   const batches = chunk(eans, options.existingCheckBatchSize);
+  let completedBatches = 0;
+  let checkedEans = 0;
+  const foundEans = new Set();
+  let progressWrite = Promise.resolve();
   const foundBatches = await mapWithConcurrency(
     batches,
     options.existingCheckConcurrency,
@@ -491,10 +505,31 @@ async function lookupExistingEans(products, client, options, jobId) {
         jobId,
         `Consultando EANs existentes ${index + 1}/${batches.length} (${batch.length} EANs).`,
       );
-      return client.searchProductsByEans(batch);
+      const results = await client.searchProductsByEans(batch);
+      completedBatches += 1;
+      checkedEans += batch.length;
+      for (const item of results || []) {
+        const ean = String(item?.ean || '').trim();
+        if (ean) foundEans.add(ean);
+      }
+
+      if (onProgress && (completedBatches % 5 === 0 || completedBatches === batches.length)) {
+        const snapshot = {
+          completedBatches,
+          totalBatches: batches.length,
+          checkedEans,
+          foundEans: foundEans.size,
+        };
+        // Serialize database notifications so an earlier async write cannot
+        // overwrite a newer progress snapshot.
+        progressWrite = progressWrite.then(() => onProgress(snapshot));
+      }
+
+      return results;
     },
     jobId,
   );
+  await progressWrite;
 
   const existingEans = new Set();
   for (const batchResults of foundBatches) {
@@ -517,6 +552,7 @@ async function selectProductsForProcessing(
   bancoUnicoClient,
   options,
   jobId,
+  onExistingCheckProgress,
 ) {
   const slice = (products) => products.slice(
     options.offset,
@@ -541,6 +577,7 @@ async function selectProductsForProcessing(
       bancoUnicoClient,
       options,
       jobId,
+      onExistingCheckProgress,
     );
     return {
       sampledProducts,
@@ -578,6 +615,7 @@ async function selectProductsForProcessing(
       bancoUnicoClient,
       options,
       jobId,
+      onExistingCheckProgress,
     );
     for (const ean of windowExisting) existingEans.add(ean);
 
@@ -604,12 +642,16 @@ async function normalizeOptions(payload, requestedBy) {
   }
 
   const sourceType = client
-    ? client.provider
+    ? client.provider === 'api'
+      ? 'trier'
+      : client.provider
     : payload.sourceType === 'file'
       ? 'file'
       : payload.sourceType === 'alpha7'
         ? 'alpha7'
-        : 'api';
+        : payload.sourceType === 'trier'
+          ? 'trier'
+          : String(payload.sourceType || '').trim();
 
   const sourceFilePath =
     client && client.provider === 'file'
@@ -620,15 +662,15 @@ async function normalizeOptions(payload, requestedBy) {
   }
 
   const sourceApiUrl =
-    client && client.provider === 'api'
+    sourceType === 'trier' && client && client.provider === 'api'
       ? DEFAULT_SOURCE_API_URL
       : String(payload.sourceApiUrl || DEFAULT_SOURCE_API_URL).trim();
   const sourceToken =
-    client && client.provider === 'api'
+    sourceType === 'trier' && client && client.provider === 'api'
       ? String(client.credential || '').trim()
       : String(payload.sourceToken || '').trim();
-  if (sourceType === 'api' && !sourceToken) {
-    throw new Error('Informe o token da API de origem.');
+  if (sourceType === 'trier' && !sourceToken) {
+    throw new Error('Informe o token da API Trier de origem.');
   }
 
   const alpha7Host =
@@ -658,6 +700,39 @@ async function normalizeOptions(payload, requestedBy) {
     );
   }
 
+  const automatizaHost =
+    client && client.provider === 'automatiza'
+      ? client.instance
+      : String(payload.automatizaHost || '').trim();
+  const automatizaPort =
+    client && client.provider === 'automatiza'
+      ? client.alpha7Port || 3306
+      : toNumber(payload.automatizaPort, 3306, { min: 1 });
+  const automatizaDatabase =
+    client && client.provider === 'automatiza'
+      ? client.alpha7Database || ''
+      : String(payload.automatizaDatabase || '').trim();
+  const automatizaUser =
+    client && client.provider === 'automatiza'
+      ? client.alpha7User || ''
+      : String(payload.automatizaUser || '').trim();
+  const automatizaPassword =
+    client && client.provider === 'automatiza'
+      ? String(client.credential || '').trim()
+      : String(payload.automatizaPassword || '').trim();
+  const automatizaShopId =
+    client && client.provider === 'automatiza'
+      ? Number(client.automatizaShopId || 0)
+      : toNumber(payload.automatizaShopId, 0, { min: 1 });
+  if (
+    sourceType === 'automatiza' &&
+    (!automatizaHost || !automatizaDatabase || !automatizaUser || !automatizaPassword || !automatizaShopId)
+  ) {
+    throw new Error(
+      'Informe host, database, usuario, senha e shop ID quando a origem for Automatiza.',
+    );
+  }
+
   const vetorToken =
     client && client.provider === 'vetor'
       ? String(client.credential || '').trim()
@@ -670,6 +745,22 @@ async function normalizeOptions(payload, requestedBy) {
     throw new Error('Informe o token da API Vetor.');
   }
 
+  const deliveryPharmacyToken =
+    client && client.provider === 'deliverypharmacy'
+      ? String(client.credential || '').trim()
+      : String(payload.deliveryPharmacyToken || '').trim();
+  const deliveryPharmacyCompanyId =
+    client && client.provider === 'deliverypharmacy'
+      ? String(client.deliveryCompanyId || '').trim()
+      : String(payload.deliveryPharmacyCompanyId || '').trim();
+  const deliveryPharmacyErpId =
+    client && client.provider === 'deliverypharmacy'
+      ? String(client.deliveryErpId || '').trim()
+      : String(payload.deliveryPharmacyErpId || '').trim();
+  if (sourceType === 'deliverypharmacy' && (!deliveryPharmacyToken || !deliveryPharmacyCompanyId || !deliveryPharmacyErpId)) {
+    throw new Error('Informe token, Empresa ID e ERP ID da Delivery Pharmacy.');
+  }
+
   const authorization = String(payload.bancoUnicoAuthorization || '').trim();
 
   return {
@@ -678,13 +769,17 @@ async function normalizeOptions(payload, requestedBy) {
     requestedBy,
     sourceType,
     sourceLabel:
-      sourceType === 'api'
+      sourceType === 'trier'
         ? sourceApiUrl
         : sourceType === 'alpha7'
           ? `alpha7-postgres://${alpha7Host}/${alpha7Database}`
           : sourceType === 'vetor'
             ? `vetor://unidade-${vetorUnidade || '?'}`
-            : sourceFilePath,
+            : sourceType === 'automatiza'
+              ? `automatiza-mysql://${automatizaHost}:${automatizaPort}/${automatizaDatabase}#shop-${automatizaShopId}`
+              : sourceType === 'deliverypharmacy'
+                ? `deliverypharmacy://empresa-${deliveryPharmacyCompanyId}/erp-${deliveryPharmacyErpId}`
+                : sourceFilePath,
     sourceFilePath,
     sourceApiUrl,
     sourceToken,
@@ -707,8 +802,17 @@ async function normalizeOptions(payload, requestedBy) {
     alpha7User,
     alpha7Password,
     alpha7Schema,
+    automatizaHost,
+    automatizaPort,
+    automatizaDatabase,
+    automatizaUser,
+    automatizaPassword,
+    automatizaShopId,
     vetorToken,
     vetorUnidade,
+    deliveryPharmacyToken,
+    deliveryPharmacyCompanyId,
+    deliveryPharmacyErpId,
     batchSize: toNumber(payload.batchSize, 50, { min: 1 }),
     classifyConcurrency: toNumber(payload.classifyConcurrency, 5, { min: 1 }),
     publishConcurrency: toNumber(payload.publishConcurrency, 1, { min: 1 }),
@@ -721,7 +825,12 @@ async function normalizeOptions(payload, requestedBy) {
     mode: payload.mode === 'classify-only' ? 'classify-only' : 'publish',
     disableNormalizeAi: toBoolean(payload.disableNormalizeAi, false),
     disableAi: toBoolean(payload.disableAi, false),
-    forceTaxonomyAi: toBoolean(payload.forceTaxonomyAi, false),
+    // A full Automatiza catalog may contain thousands of products. Prefer the
+    // deterministic taxonomy match and only call IA for ambiguous products.
+    forceTaxonomyAi:
+      sourceType === 'automatiza'
+        ? false
+        : toBoolean(payload.forceTaxonomyAi, false),
     ignoreExistingCheck: toBoolean(payload.ignoreExistingCheck, false),
     useAiNormalization: toBoolean(payload.useAiNormalization, false),
     bancoUnicoBaseUrl: String(
@@ -777,6 +886,42 @@ async function loadSourceProducts(options, jobId = null) {
       sourceLabel: client.describeSource(),
       sourceProviderLabel: 'Vetor',
     };
+  }
+
+  if (options.sourceType === 'automatiza') {
+    const client = new AutomatizaProductsClient({
+      host: options.automatizaHost,
+      port: options.automatizaPort,
+      database: options.automatizaDatabase,
+      user: options.automatizaUser,
+      password: options.automatizaPassword,
+      shopId: options.automatizaShopId,
+      pageSize: options.sourcePageSize,
+    });
+
+    return {
+      products: await client.fetchAllProducts(),
+      sourceLabel: client.describeSource(),
+      sourceProviderLabel: 'Automatiza',
+    };
+  }
+
+  if (options.sourceType === 'deliverypharmacy') {
+    const client = new DeliveryPharmacyProductsClient({
+      token: options.deliveryPharmacyToken,
+      companyId: options.deliveryPharmacyCompanyId,
+      erpId: options.deliveryPharmacyErpId,
+    });
+
+    return {
+      products: await client.fetchAllProducts(),
+      sourceLabel: client.describeSource(),
+      sourceProviderLabel: 'Delivery Pharmacy',
+    };
+  }
+
+  if (options.sourceType !== 'trier') {
+    throw new Error(`Origem de importacao nao suportada: ${options.sourceType}.`);
   }
 
   const client = new TrierProductsClient({
@@ -843,51 +988,21 @@ async function loadSourceProducts(options, jobId = null) {
   };
 }
 
-// ponytail: sequential await-per-row upserts were the main throughput killer
-// (one DB round trip per product, awaited one at a time). Rows are
-// independent (conflict target is each row's own externalKey), so there is
-// no atomicity requirement across the batch — firing them in parallel chunks
-// avoids both the round-trip stall AND the 5s default timeout an interactive
-// prisma.$transaction hits once a chunk gets large (saw this fail in
-// production as "rollback cannot be executed on an expired transaction").
-// Keep this at or below the pg pool's `max` (see PrismaClient.js) — a chunk
-// larger than the pool queues on connection acquisition and can itself time
-// out ("Operation has timed out"), which is what pushing this to 50 caused.
-const PERSIST_PARALLEL_CHUNK = 20;
+const PERSIST_BULK_CHUNK = 1_000;
 
 async function persistItemBatch(records) {
   if (!records.length) {
     return;
   }
 
-  for (const recordsChunk of chunk(records, PERSIST_PARALLEL_CHUNK)) {
-    await Promise.all(
-      recordsChunk.map((record) =>
-        prisma.bancoUnicoImportItem.upsert({
-          where: { externalKey: record.externalKey },
-          create: record,
-          update: {
-            sourceProductId: record.sourceProductId,
-            ean: record.ean,
-            nameOriginal: record.nameOriginal,
-            nameNormalized: record.nameNormalized,
-            manufacturer: record.manufacturer,
-            activeIngredient: record.activeIngredient,
-            status: record.status,
-            skippedReason: record.skippedReason,
-            errorStage: record.errorStage,
-            errorMessage: record.errorMessage,
-            confidence: record.confidence,
-            needsReview: record.needsReview,
-            taxonomy: record.taxonomy,
-            metadata: record.metadata,
-            payload: record.payload,
-            sourcePayload: record.sourcePayload,
-            publishedAt: record.publishedAt ?? null,
-          },
-        }),
-      ),
-    );
+  // Import records are immutable per attempt. A retry clears them first; on a
+  // resumed worker, duplicate external keys already represent the same item.
+  // Bulk inserts avoid thousands of individual upserts and pool timeouts.
+  for (const recordsChunk of chunk(records, PERSIST_BULK_CHUNK)) {
+    await prisma.bancoUnicoImportItem.createMany({
+      data: recordsChunk,
+      skipDuplicates: true,
+    });
   }
 
   publishItemsChanged(records[0].jobId, {
@@ -899,6 +1014,7 @@ async function persistItemBatch(records) {
 async function setProgress(jobId, metrics, stage, message) {
   const summary = buildSummary(metrics);
   await updateJob(jobId, {
+    status: 'processing',
     currentStage: stage,
     currentMessage: message,
     progressCurrent: metrics.progressCurrent,
@@ -927,6 +1043,7 @@ async function runImportJob(jobId, options) {
     pauseAnnounced: existingActiveState?.pauseAnnounced ?? false,
     resumeStage: existingActiveState?.resumeStage ?? null,
     resumeMessage: existingActiveState?.resumeMessage ?? null,
+    workerId: existingActiveState?.workerId ?? WORKER_ID,
     clientId: options.clientId ?? null,
     clientName: options.clientName ?? null,
   });
@@ -969,7 +1086,7 @@ async function runImportJob(jobId, options) {
     });
 
     await updateJob(jobId, {
-      status: 'running',
+      status: 'processing',
       startedAt: new Date(),
       currentStage: 'loading_source',
       currentMessage: 'Carregando produtos de origem.',
@@ -1046,6 +1163,20 @@ async function runImportJob(jobId, options) {
       bancoUnicoClient,
       options,
       jobId,
+      async ({ completedBatches, totalBatches, checkedEans, foundEans }) => {
+        metrics.progressCurrent = completedBatches;
+        metrics.progressTotal = totalBatches;
+        metrics.progressPercent = percentage(completedBatches, totalBatches);
+        metrics.totalSampled = checkedEans;
+        metrics.totalExisting = foundEans;
+
+        await setProgress(
+          jobId,
+          metrics,
+          'checking_existing',
+          `Consultando itens existentes no Banco Unico: ${checkedEans.toLocaleString('pt-BR')} EANs analisados em ${completedBatches}/${totalBatches} lotes.`,
+        );
+      },
     );
     metrics.totalSampled = sampledProducts.length;
 
@@ -1359,7 +1490,38 @@ async function runImportJob(jobId, options) {
     }
   } finally {
     ACTIVE_JOBS.delete(jobId);
+    await prisma.bancoUnicoImportJob.updateMany({
+      where: { id: jobId, workerId: WORKER_ID },
+      data: { workerId: null, workerHeartbeatAt: null },
+    });
   }
+}
+
+async function claimImportJob(jobId) {
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - WORKER_LEASE_MS);
+  const result = await prisma.bancoUnicoImportJob.updateMany({
+    where: {
+      id: jobId,
+      status: { in: RECOVERABLE_JOB_STATUSES },
+      OR: [
+        { workerId: null },
+        { workerId: WORKER_ID },
+        { workerHeartbeatAt: { lt: staleBefore } },
+      ],
+    },
+    data: {
+      // Older workers only recover pending/running/cancelling. Keeping a
+      // claimed job in this new state prevents them from starting a second,
+      // incompatible Trier execution against the same import.
+      status: 'claimed',
+      workerId: WORKER_ID,
+      workerHeartbeatAt: now,
+      currentStage: 'claimed',
+      currentMessage: 'Subida reservada por um worker.',
+    },
+  });
+  return result.count === 1;
 }
 
 async function startManagedJob(jobId, optionsOverride = null) {
@@ -1383,6 +1545,10 @@ async function startManagedJob(jobId, optionsOverride = null) {
     return;
   }
 
+  if (!(await claimImportJob(normalizedJobId))) {
+    return;
+  }
+
   if (
     hasAnotherActiveJobForClient({
       jobId: normalizedJobId,
@@ -1401,6 +1567,7 @@ async function startManagedJob(jobId, optionsOverride = null) {
     pauseAnnounced: false,
     resumeStage: null,
     resumeMessage: null,
+    workerId: WORKER_ID,
     clientId: job.clientId ?? null,
     clientName: job.clientName ?? null,
   });
@@ -1485,7 +1652,9 @@ export async function createBancoUnicoImportJob(payload) {
       clientName: options.clientName,
       sourceType: options.sourceType,
       sourceLabel: options.sourceLabel,
-      status: 'pending',
+      status: 'claimed',
+      currentStage: 'claimed',
+      currentMessage: 'Subida aguardando inicializacao do worker.',
       mode: options.mode,
       requestedBy,
       options,
@@ -1502,6 +1671,79 @@ export async function createBancoUnicoImportJob(payload) {
   await startManagedJob(job.id, options);
 
   return formatJob(job);
+}
+
+export async function retryBancoUnicoImportJob(jobId, requestedBy = 'Sistema') {
+  const id = Number(jobId);
+  const job = await prisma.bancoUnicoImportJob.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      clientId: true,
+      clientName: true,
+      status: true,
+      options: true,
+    },
+  });
+
+  if (!job) {
+    throw new Error('Importacao nao encontrada.');
+  }
+
+  if (job.status !== 'failed') {
+    throw new Error('Apenas importacoes com falha podem ser executadas novamente.');
+  }
+
+  if (hasAnotherActiveJobForClient({ jobId: id, clientId: job.clientId, clientName: job.clientName })) {
+    throw new Error('Ja existe uma subida ativa para este cliente.');
+  }
+
+  // Rebuild from the registered client so retries also repair jobs created
+  // before a provider gained its own source configuration.
+  const options = await normalizeOptions(
+    {
+      ...(job.options && typeof job.options === 'object' ? job.options : {}),
+      clientId: job.clientId,
+    },
+    requestedBy,
+  );
+
+  await prisma.$transaction([
+    prisma.bancoUnicoImportItem.deleteMany({ where: { jobId: id } }),
+    prisma.bancoUnicoImportJob.update({
+      where: { id },
+      data: {
+        status: 'claimed',
+        currentStage: 'claimed',
+        currentMessage: 'Nova tentativa aguardando inicializacao do worker.',
+        progressCurrent: 0,
+        progressTotal: 0,
+        progressPercent: 0,
+        totalCatalogValid: 0,
+        totalInvalidEans: 0,
+        totalSampled: 0,
+        totalSelected: 0,
+        totalExisting: 0,
+        totalPrepared: 0,
+        totalSkipped: 0,
+        totalErrors: 0,
+        totalPublished: 0,
+        summary: null,
+        startedAt: null,
+        finishedAt: null,
+        requestedBy: String(requestedBy || 'Sistema').trim() || 'Sistema',
+        workerId: null,
+        workerHeartbeatAt: null,
+        sourceType: options.sourceType,
+        sourceLabel: options.sourceLabel,
+        options,
+      },
+    }),
+  ]);
+
+  await emitEvent(id, 'Nova tentativa de subida solicitada.');
+  await startManagedJob(id, options);
+  return getBancoUnicoImportJob(id);
 }
 
 export async function listBancoUnicoImportJobs({
@@ -1807,7 +2049,7 @@ export async function pauseBancoUnicoImportJob(jobId, username = 'Sistema') {
   if (!job) {
     throw new Error('Importacao nao encontrada.');
   }
-  if (!['pending', 'running'].includes(job.status)) {
+  if (!['pending', 'claimed', 'processing', 'running'].includes(job.status)) {
     throw new Error('Apenas importacoes pendentes ou em execucao podem ser pausadas.');
   }
 
@@ -1862,7 +2104,7 @@ export async function resumeBancoUnicoImportJob(jobId, username = 'Sistema') {
     activeJob.resume = null;
     activeJob.pausePromise = null;
     await updateJob(normalizedJobId, {
-      status: 'running',
+      status: 'processing',
       currentStage: activeJob.resumeStage || 'running',
       currentMessage: activeJob.resumeMessage || 'Importacao retomada pelo usuario.',
     });

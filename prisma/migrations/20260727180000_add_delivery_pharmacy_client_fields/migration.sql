@@ -1,0 +1,3 @@
+ALTER TABLE "sistema"."clients"
+ADD COLUMN IF NOT EXISTS "deliveryCompanyId" VARCHAR(100),
+ADD COLUMN IF NOT EXISTS "deliveryErpId" VARCHAR(100);

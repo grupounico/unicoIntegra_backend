@@ -10,6 +10,7 @@ import {
   listBancoUnicoImportJobsController,
   pauseBancoUnicoImportJobController,
   resumeBancoUnicoImportJobController,
+  retryBancoUnicoImportJobController,
   streamBancoUnicoImportController,
 } from '../controllers/bancoUnicoImports.controller.js';
 
@@ -24,6 +25,7 @@ router.get('/:id/items/facets', getBancoUnicoImportItemFacetsController);
 router.get('/:id/events', listBancoUnicoImportEventsController);
 router.post('/:id/pause', pauseBancoUnicoImportJobController);
 router.post('/:id/resume', resumeBancoUnicoImportJobController);
+router.post('/:id/retry', retryBancoUnicoImportJobController);
 router.post('/:id/cancel', cancelBancoUnicoImportJobController);
 router.delete('/:id', deleteBancoUnicoImportJobController);
 
