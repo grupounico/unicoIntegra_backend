@@ -988,7 +988,34 @@ async function loadSourceProducts(options, jobId = null) {
   };
 }
 
-const PERSIST_BULK_CHUNK = 1_000;
+// Source payloads can be large JSON documents. Small, sequential inserts keep
+// the control database responsive while product classification is running.
+const PERSIST_BULK_CHUNK = 10;
+const PERSIST_BULK_MAX_ATTEMPTS = 3;
+
+function isTransientPersistenceError(error) {
+  return /operation has timed out|timeout|connection.*closed|connection.*reset/i.test(
+    String(error?.message || ''),
+  );
+}
+
+async function persistItemChunk(recordsChunk) {
+  for (let attempt = 1; attempt <= PERSIST_BULK_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await prisma.bancoUnicoImportItem.createMany({
+        data: recordsChunk,
+        skipDuplicates: true,
+      });
+      return;
+    } catch (error) {
+      if (!isTransientPersistenceError(error) || attempt === PERSIST_BULK_MAX_ATTEMPTS) {
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    }
+  }
+}
 
 async function persistItemBatch(records) {
   if (!records.length) {
@@ -997,12 +1024,9 @@ async function persistItemBatch(records) {
 
   // Import records are immutable per attempt. A retry clears them first; on a
   // resumed worker, duplicate external keys already represent the same item.
-  // Bulk inserts avoid thousands of individual upserts and pool timeouts.
+  // Keep writes serial because each record may include the full source JSON.
   for (const recordsChunk of chunk(records, PERSIST_BULK_CHUNK)) {
-    await prisma.bancoUnicoImportItem.createMany({
-      data: recordsChunk,
-      skipDuplicates: true,
-    });
+    await persistItemChunk(recordsChunk);
   }
 
   publishItemsChanged(records[0].jobId, {
@@ -1378,10 +1402,10 @@ async function runImportJob(jobId, options) {
         }
       }
 
-      await Promise.all([
-        persistItemBatch(preparedRecords),
-        persistItemBatch(skippedRecords),
-        persistItemBatch(errorRecords),
+      await persistItemBatch([
+        ...preparedRecords,
+        ...skippedRecords,
+        ...errorRecords,
       ]);
 
       const chunkLog = chunkResults.map((result) => result.logLine).join('\n');
