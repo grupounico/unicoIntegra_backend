@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/*.test.js",
     "dev": "nodemon --ignore builds-temporarios --ignore node_modules --ignore src/data/ai-template-workspaces.json src/server.js",
     "totp": "node --input-type=module -r dotenv/config -e \"import { generateTotpToken } from './src/services/totp.services.js'; console.log(generateTotpToken(process.env.INSTANCE_SERVICE_TOTP_SECRET, { digits: Number(process.env.INSTANCE_SERVICE_TOTP_DIGITS || 6), period: Number(process.env.INSTANCE_SERVICE_TOTP_PERIOD_SECONDS || 30) }));\""
 

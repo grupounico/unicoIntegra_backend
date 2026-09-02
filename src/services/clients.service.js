@@ -5,6 +5,7 @@ import {
   deleteMultiProviderClient,
   regenerateMultiProviderApiKey,
 } from './multiProviderClients.service.js';
+import { decryptSecret, encryptSecret } from '../modules/catalog-deployment/crypto.js';
 
 const PROVIDERS = new Set(['api', 'file', 'alpha7', 'vetor', 'automatiza', 'deliverypharmacy']);
 const DEFAULT_TRIER_API_URL =
@@ -27,10 +28,10 @@ function formatClient(client) {
     provider: client.provider,
     instance: client.clientInstance || 'Nao informada',
     providerConfig: client.instance,
-    hasCredential: Boolean(client.credential),
-    credentialHint: maskCredentialHint(client.credential),
+    hasCredential: Boolean(client.credentialEncrypted || client.credential),
+    credentialHint: client.credentialEncrypted ? 'Protegida' : maskCredentialHint(client.credential),
     multiProviderTenantId: client.multiProviderTenantId,
-    hasMultiProviderCredential: Boolean(client.multiProviderApiKey),
+    hasMultiProviderCredential: Boolean(client.multiProviderApiKeyEncrypted || client.multiProviderApiKey),
     alpha7Port: client.alpha7Port,
     alpha7Database: client.alpha7Database,
     alpha7User: client.alpha7User,
@@ -41,6 +42,14 @@ function formatClient(client) {
     createdAt: client.createdAt,
     updatedAt: client.updatedAt,
   };
+}
+
+function sourceCredential(client) {
+  return client.credentialEncrypted ? decryptSecret(client.credentialEncrypted) : client.credential;
+}
+
+function multiProviderCredential(client) {
+  return client.multiProviderApiKeyEncrypted ? decryptSecret(client.multiProviderApiKeyEncrypted) : client.multiProviderApiKey;
 }
 
 export async function listClients({ page = 1, limit = 50, search = '' } = {}) {
@@ -95,7 +104,7 @@ export async function getClientWithCredential(id) {
     throw new Error('Cliente nao encontrado.');
   }
 
-  return client;
+  return { ...client, credential: sourceCredential(client) };
 }
 
 export async function getClientMultiProviderApiKey(id, username) {
@@ -103,7 +112,7 @@ export async function getClientMultiProviderApiKey(id, username) {
   if (!client) {
     throw new Error('Cliente nao encontrado.');
   }
-  if (!client.multiProviderApiKey) {
+  if (!client.multiProviderApiKeyEncrypted && !client.multiProviderApiKey) {
     throw new Error('Este cliente ainda nao possui uma API key multi-provider.');
   }
 
@@ -113,7 +122,7 @@ export async function getClientMultiProviderApiKey(id, username) {
     client.name,
   );
 
-  return { apiKey: client.multiProviderApiKey };
+  return { apiKey: multiProviderCredential(client) };
 }
 
 export async function setupClientMultiProvider(id, username) {
@@ -125,14 +134,15 @@ export async function setupClientMultiProvider(id, username) {
     error.statusCode = 400;
     throw error;
   }
-  if (existing.multiProviderTenantId || existing.multiProviderApiKey) return formatClient(existing);
+  if (existing.multiProviderTenantId || existing.multiProviderApiKeyEncrypted || existing.multiProviderApiKey) return formatClient(existing);
 
-  const multiProvider = await createMultiProviderClient(existing);
+  const multiProvider = await createMultiProviderClient({ ...existing, credential: sourceCredential(existing) });
   const updated = await prisma.client.update({
     where: { id: clientId },
     data: {
       multiProviderTenantId: multiProvider.tenantId,
-      multiProviderApiKey: multiProvider.apiKey,
+      multiProviderApiKey: null,
+      multiProviderApiKeyEncrypted: encryptSecret(multiProvider.apiKey),
     },
   });
 
@@ -161,7 +171,7 @@ export async function regenerateClientMultiProviderApiKey(id, username) {
 
   const updated = await prisma.client.update({
     where: { id: clientId },
-    data: { multiProviderApiKey: apiKey },
+    data: { multiProviderApiKey: null, multiProviderApiKeyEncrypted: encryptSecret(apiKey) },
   });
 
   await createLogService(
@@ -240,9 +250,11 @@ export async function createClient(payload) {
       clientInstance,
       provider,
       instance,
-      credential: sourceCredential,
+      credential: null,
+      credentialEncrypted: sourceCredential ? encryptSecret(sourceCredential) : null,
       multiProviderTenantId: multiProvider?.tenantId || null,
-      multiProviderApiKey: multiProvider?.apiKey || null,
+      multiProviderApiKey: null,
+      multiProviderApiKeyEncrypted: multiProvider?.apiKey ? encryptSecret(multiProvider.apiKey) : null,
       alpha7Port: provider === 'alpha7' || provider === 'automatiza' ? Number(payload.alpha7Port) || (provider === 'automatiza' ? 3306 : 5432) : null,
       alpha7Database: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7Database || '').trim() : null,
       alpha7User: provider === 'alpha7' || provider === 'automatiza' ? String(payload.alpha7User || '').trim() : null,
@@ -313,7 +325,9 @@ export async function updateClient(id, payload) {
     data.instance = DEFAULT_TRIER_API_URL;
   }
   if (payload.credential !== undefined) {
-    data.credential = String(payload.credential).trim() || null;
+    const nextCredential = String(payload.credential).trim() || null;
+    data.credential = null;
+    data.credentialEncrypted = nextCredential ? encryptSecret(nextCredential) : null;
   }
 
   if (provider === 'alpha7') {
