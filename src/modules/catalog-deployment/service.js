@@ -154,7 +154,13 @@ async function importBancoUnico(deployment, units) {
       }
       if (!current.bancoUnicoImportJobId) {
         const activeJob = await prisma.bancoUnicoImportJob.findFirst({ where: { clientId: current.clientId, status: { in: [...ACTIVE_JOBS] } }, orderBy: { createdAt: 'desc' } });
-        const job = activeJob || await createBancoUnicoImportJob({ clientId: current.clientId, username: deployment.requestedBy, mode: 'publish' });
+        const job = activeJob || await createBancoUnicoImportJob({
+          clientId: current.clientId,
+          username: deployment.requestedBy,
+          mode: 'publish',
+          bancoUnicoBaseUrl: env.BANCO_UNICO_BASE_URL,
+          authorization: env.BANCO_UNICO_AUTHORIZATION,
+        });
         current = await prisma.clientDeploymentUnit.update({ where: { id: current.id }, data: { bancoUnicoImportJobId: job.id, status: 'banco_unico_importing' } });
       }
       const job = await getBancoUnicoImportJob(current.bancoUnicoImportJobId);
