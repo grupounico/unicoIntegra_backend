@@ -137,6 +137,10 @@ async function api(path, options = {}) {
 }
 
 try {
+  const readiness = await api('/health/ready');
+  assert.equal(readiness.status, 200);
+  assert.deepEqual(readiness.body, { status: 'ready', database: 'ok' });
+
   const createPayload = {
     requestedBy: 'Teste E2E',
     group: { cnpj: '11222333000181', nome: 'Rede Teste', username: 'rede-teste' },

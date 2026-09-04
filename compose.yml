@@ -1,0 +1,41 @@
+services:
+  app:
+    build:
+      context: .
+    image: unico-integra-backend:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4000
+      DEPLOYMENT_WORKER_ENABLED: ${WORKERS_ENABLED:-true}
+      BANCO_UNICO_IMPORT_WORKER_ENABLED: ${WORKERS_ENABLED:-true}
+      AI_URA_AUDIT_ENABLED: ${SCHEDULERS_ENABLED:-true}
+      # 127.0.0.1 dentro do container e o proprio container. Este endereco
+      # permite acessar o multi-provider executado diretamente na VPS.
+      MULTIPROVIDER_BASE_URL: ${MULTIPROVIDER_DOCKER_BASE_URL:-http://host.docker.internal:51240}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${APP_BIND_PORT:-4000}:4000"
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 4
+
+  migrate:
+    image: unico-integra-backend:local
+    profiles: ["tools"]
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    command: ["npx", "prisma", "migrate", "deploy"]
+    restart: "no"
