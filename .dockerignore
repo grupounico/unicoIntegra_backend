@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+npm-debug.log*
+*.log
+builds-temporarios
+downloads/*.zip
+dist
+coverage
+.DS_Store
+unicommerce-backend-system.html

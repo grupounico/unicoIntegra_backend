@@ -18,6 +18,8 @@ import chatRoutes from './routes/chat.routes.js';
 import extensionRoutes from './routes/extensions.routes.js';
 import bancoUnicoImportsRoutes from './routes/bancoUnicoImports.routes.js';
 import clientsRoutes from './routes/clients.routes.js';
+import catalogDeploymentRoutes from './modules/catalog-deployment/routes.js';
+import healthRoutes from './routes/health.routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -96,6 +98,7 @@ app.use(
 
 app.use(express.json({ limit: '1mb' }));
 app.use('/downloads', express.static(downloadsPath));
+app.use('/health', healthRoutes);
 
 app.post('/api/generate', async (req, res) => {
   const clientData = req.body;
@@ -204,6 +207,7 @@ app.use('/api/news', newsRoutes);
 app.use('/api/extensions', extensionRoutes);
 app.use('/api/banco-unico-imports', bancoUnicoImportsRoutes);
 app.use('/api/clients', clientsRoutes);
+app.use('/api/v1/deployments', catalogDeploymentRoutes);
 app.use('/api', logsRoutes);
 app.use('/chat', chatRoutes);
 

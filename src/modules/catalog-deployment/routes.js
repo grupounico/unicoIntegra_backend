@@ -1,0 +1,19 @@
+import { Router } from 'express';
+import * as controller from './controller.js';
+
+const router = Router();
+router.post('/', controller.create);
+router.get('/', controller.list);
+router.get('/:deploymentId', controller.get);
+router.get('/:deploymentId/events', controller.events);
+router.get('/:deploymentId/stream', controller.stream);
+router.post('/:deploymentId/start', controller.start);
+router.post('/:deploymentId/retry', controller.retry);
+router.post('/:deploymentId/units/:unitId/retry', controller.retryUnit);
+router.post('/:deploymentId/units/:unitId/run', controller.runUnit);
+router.post('/:deploymentId/units/:unitId/activate-shadow', controller.activateShadow);
+router.post('/:deploymentId/activate-tenants', controller.activateTenants);
+router.post('/:deploymentId/cancel', controller.cancel);
+router.post('/:deploymentId/assets/presign', controller.presignAssets);
+router.post('/:deploymentId/assets/confirm', controller.confirmAsset);
+export default router;
