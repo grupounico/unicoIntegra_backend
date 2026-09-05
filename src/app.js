@@ -73,7 +73,15 @@ const corsOptions = {
     return callback(null, false);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-api-key',
+    'X-Correlation-Id',
+    'X-Request-Id',
+    'X-Operator-Name',
+    'Idempotency-Key',
+  ],
   exposedHeaders: ['Content-Disposition'],
   credentials: true,
   optionsSuccessStatus: 204,
