@@ -18,5 +18,5 @@ export const activateTenants = handler((req) => service.activateTenants(req.para
 export const cancel = handler((req) => service.cancelDeployment(req.params.deploymentId, actor(req)), 202);
 export const presignAssets = handler((req) => service.presignDeploymentAssets(req.params.deploymentId, req.body?.assets || []));
 export const confirmAsset = handler((req) => service.confirmDeploymentAsset(req.params.deploymentId, req.body || {}));
-export async function events(req, res) { try { const deployment = await service.getDeployment(req.params.deploymentId); return res.json({ data: deployment.events || [] }); } catch (error) { return res.status(error.statusCode || 500).json(publicError(error, { deploymentId: req.params.deploymentId })); } }
+export async function events(req, res) { try { return res.json(await service.listDeploymentEvents(req.params.deploymentId, req.query || {})); } catch (error) { return res.status(error.statusCode || 500).json(publicError(error, { deploymentId: req.params.deploymentId })); } }
 export async function stream(req, res) { try { await service.getDeployment(req.params.deploymentId); service.subscribe(req.params.deploymentId, res); } catch (error) { if (!res.headersSent) res.status(error.statusCode || 500).json(publicError(error, { deploymentId: req.params.deploymentId })); } }

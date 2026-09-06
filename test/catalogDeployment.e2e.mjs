@@ -185,6 +185,9 @@ try {
   }
   assert.equal(deployment.status, 'awaiting_activation', JSON.stringify(deployment));
   assert.equal(deployment.units[0].status, 'awaiting_activation');
+  assert.equal(deployment.progress.percent, 95);
+  assert.ok(deployment.steps.length >= 8);
+  assert.ok(deployment.steps.every((step) => ['completed', 'failed'].includes(step.status)));
   assert.ok(publishedProducts > 0);
   assert.equal(JSON.stringify(deployment).includes('seller-secret'), false);
   assert.equal(JSON.stringify(deployment).includes('catalog_test'), false);
@@ -193,7 +196,16 @@ try {
   assert.equal(activated.status, 202);
   assert.equal(activated.body.status, 'completed');
   assert.equal(activated.body.units[0].status, 'active');
+  assert.equal(activated.body.progress.percent, 100);
+  assert.equal(activated.body.progress.completedUnits, 1);
   assert.equal(tenants.get('tenant-1').status, 'active');
+  const timeline = await api(`/api/v1/deployments/${deploymentId}/events?pageSize=200`);
+  assert.equal(timeline.status, 200);
+  assert.ok(timeline.body.meta.totalItems > 10);
+  assert.ok(timeline.body.data.some((item) => item.eventType === 'step_completed'));
+  assert.ok(timeline.body.data.some((item) => item.eventType === 'banco_unico_import_progress'));
+  assert.equal(JSON.stringify(timeline.body).includes('seller-secret'), false);
+  assert.equal(JSON.stringify(timeline.body).includes('catalog_test'), false);
   const verificationPool = new Pool({ connectionString: databaseUrl });
   const secretRows = await verificationPool.query('SELECT credential, "credentialEncrypted", "multiProviderApiKey", "multiProviderApiKeyEncrypted" FROM sistema.clients');
   await verificationPool.end();
