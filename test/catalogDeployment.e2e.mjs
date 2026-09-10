@@ -12,12 +12,19 @@ Object.assign(process.env, {
   DEPLOYMENT_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
   HUBUNICO_BASE_URL: 'http://127.0.0.1:56100',
   HUBUNICO_ADMIN_API_KEY: 'hub-admin-secret',
+  HUBUNICO_STAGING_BASE_URL: 'http://127.0.0.1:56100',
+  HUBUNICO_STAGING_ADMIN_API_KEY: 'hub-admin-secret',
   UNICOMMERCE_BACK_BASE_URL: 'http://127.0.0.1:56101',
   UNICOMMERCE_BACK_INTERNAL_API_KEY: 'commerce-secret',
+  UNICOMMERCE_BACK_STAGING_BASE_URL: 'http://127.0.0.1:56101',
+  UNICOMMERCE_BACK_STAGING_INTERNAL_API_KEY: 'commerce-secret',
   MULTIPROVIDER_BASE_URL: 'http://127.0.0.1:56101',
   MULTIPROVIDER_ADMIN_API_KEY: 'multi-secret',
   BANCO_UNICO_BASE_URL: 'http://127.0.0.1:56102',
   BANCO_UNICO_AUTHORIZATION: 'banco-secret',
+  BANCO_UNICO_STAGING_BASE_URL: 'http://127.0.0.1:56102',
+  BANCO_UNICO_STAGING_AUTHORIZATION: 'banco-secret',
+  CATALOG_DEPLOYMENT_ENVIRONMENT: 'staging',
   DEPLOYMENT_WORKER_ENABLED: 'true',
   DEPLOYMENT_WORKER_INTERVAL_MS: '1000',
   DEPLOYMENT_LEASE_MS: '10000',
@@ -184,6 +191,7 @@ try {
     if (['awaiting_activation', 'failed', 'partially_failed', 'reconciliation_required'].includes(deployment.status)) break;
   }
   assert.equal(deployment.status, 'awaiting_activation', JSON.stringify(deployment));
+  assert.equal(deployment.environment, 'staging');
   assert.equal(deployment.units[0].status, 'awaiting_activation');
   assert.equal(deployment.progress.percent, 95);
   assert.ok(deployment.steps.length >= 8);
