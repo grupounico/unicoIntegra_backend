@@ -18,6 +18,9 @@ export function resumableUnitStatus(unit) {
   return unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';
 }
 
-export function shouldRetryBancoUnicoJob(unitStatus, jobStatus) {
-  return unitStatus === 'unicommerce_ready' && jobStatus === 'failed';
+export function shouldRetryBancoUnicoJob(unitStatus, jobStatus, totalErrors = 0) {
+  const retryableJob = jobStatus === 'failed'
+    || (jobStatus === 'completed' && Number(totalErrors) > 0);
+
+  return unitStatus === 'unicommerce_ready' && retryableJob;
 }
