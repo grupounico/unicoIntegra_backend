@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTenantErpConfig, resumableUnitStatus } from '../src/modules/catalog-deployment/tenant-routing.js';
+import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from '../src/modules/catalog-deployment/tenant-routing.js';
 
 test('configura a rota do Hub correspondente ao ambiente no tenant', () => {
   assert.deepEqual(buildTenantErpConfig(
@@ -18,8 +18,14 @@ test('configura a rota do Hub correspondente ao ambiente no tenant', () => {
 
 test('retry com tenant existente volta para reconciliacao do Unicommerce', () => {
   assert.equal(resumableUnitStatus({ hubIntegrationId: 2, unicommerceTenantId: 'tenant-1' }), 'catalog_active');
-  assert.equal(resumableUnitStatus({ hubIntegrationId: 2, unicommerceTenantId: 'tenant-1', bancoUnicoImportJobId: 'job-1' }), 'banco_unico_importing');
+  assert.equal(resumableUnitStatus({ hubIntegrationId: 2, unicommerceTenantId: 'tenant-1', bancoUnicoImportJobId: 'job-1' }), 'catalog_active');
   assert.equal(resumableUnitStatus({ hubIntegrationId: 2 }), 'scheduled');
   assert.equal(resumableUnitStatus({ hubSellerUnitId: 10 }), 'hub_unit_created');
   assert.equal(resumableUnitStatus({}), 'pending');
+});
+
+test('repete job falho somente depois de uma nova validacao do Unicommerce', () => {
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'failed'), true);
+  assert.equal(shouldRetryBancoUnicoJob('banco_unico_importing', 'failed'), false);
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'processing'), false);
 });
