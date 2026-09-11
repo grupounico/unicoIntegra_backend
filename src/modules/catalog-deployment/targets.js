@@ -37,5 +37,16 @@ export function catalogTargets(environment) {
       baseUrl: production ? env.BANCO_UNICO_PRODUCTION_BASE_URL || env.BANCO_UNICO_BASE_URL : env.BANCO_UNICO_STAGING_BASE_URL,
       authorization: production ? env.BANCO_UNICO_PRODUCTION_AUTHORIZATION || env.BANCO_UNICO_AUTHORIZATION : env.BANCO_UNICO_STAGING_AUTHORIZATION,
     },
+    storefront: {
+      enabled: env.STOREFRONT_PROVISIONING_ENABLED,
+      domainPrefix: env.STOREFRONT_DOMAIN_PREFIX,
+      domainSuffix: env.STOREFRONT_DOMAIN_SUFFIX,
+      healthTimeoutMs: env.STOREFRONT_HEALTH_TIMEOUT_MS,
+      vercel: {
+        apiToken: production ? env.VERCEL_PRODUCTION_API_TOKEN || env.VERCEL_API_TOKEN : env.VERCEL_STAGING_API_TOKEN || env.VERCEL_API_TOKEN,
+        teamId: production ? env.VERCEL_PRODUCTION_TEAM_ID || env.VERCEL_TEAM_ID : env.VERCEL_STAGING_TEAM_ID || env.VERCEL_TEAM_ID,
+        projectId: production ? env.VERCEL_PRODUCTION_PROJECT_ID || env.VERCEL_PROJECT_ID : env.VERCEL_STAGING_PROJECT_ID || env.VERCEL_PROJECT_ID,
+      },
+    },
   };
 }

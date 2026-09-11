@@ -42,3 +42,25 @@ export async function activateTenant(target, tenantId, idempotencyKey, unitId) {
   try { return (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, { status: 'active' }, { headers: { 'Idempotency-Key': idempotencyKey } }))).data; }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'activating_tenants', unitId); }
 }
+
+export async function configureStorefrontDomain(target, tenantId, storefrontDomain, unitId) {
+  try {
+    const tenant = (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, { storefrontDomain }))).data;
+    if (tenant.storefrontDomain !== storefrontDomain || tenant.status !== 'active') {
+      throw new DeploymentError('DOMAIN_TENANT_MISMATCH', 'O domínio não foi associado ao tenant ativo esperado.', {
+        statusCode: 409, stage: 'provisioning_storefront', unitId,
+        action: 'Revise o tenant no UnicommerceBack antes de repetir.',
+      });
+    }
+    return tenant;
+  } catch (error) {
+    if (error instanceof DeploymentError) throw error;
+    if (error.response?.status === 409) {
+      throw new DeploymentError('UNICOMMERCE_STOREFRONT_DOMAIN_CONFLICT', 'O domínio já pertence a outro tenant no UnicommerceBack.', {
+        statusCode: 409, stage: 'provisioning_storefront', unitId,
+        action: 'Revise o domínio e o tenant associado antes de repetir.',
+      });
+    }
+    throw mapUpstreamError(error, 'UNICOMMERCE', 'provisioning_storefront', unitId);
+  }
+}

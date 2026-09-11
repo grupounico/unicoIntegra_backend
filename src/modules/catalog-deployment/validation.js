@@ -49,7 +49,8 @@ export function validateCreatePayload(payload) {
   const groupCnpj = digits(group.cnpj);
   if (!isValidCnpj(groupCnpj)) throw new DeploymentError('INVALID_CNPJ', 'O CNPJ do grupo é inválido.', { statusCode: 400, stage: 'validation' });
   const groupName = requiredString(group.nome, 'group.nome', 255);
-  const username = requiredString(group.username, 'group.username', 50);
+  const username = requiredString(group.username, 'group.username', 51).replace(/^@/, '');
+  if (!username || username.length > 50) throw new DeploymentError('INVALID_USERNAME', 'group.username deve ter no máximo 50 caracteres.', { statusCode: 400, stage: 'validation' });
   if (!/^[A-Za-z0-9._-]+$/.test(username)) throw new DeploymentError('INVALID_USERNAME', 'group.username deve ser informado sem espaços.', { statusCode: 400, stage: 'validation' });
   if (!Array.isArray(payload.units) || payload.units.length === 0) throw new DeploymentError('INVALID_UNITS', 'Informe pelo menos uma unidade.', { statusCode: 400, stage: 'validation' });
   if (payload.units.filter((unit) => unit.initial === true).length > 1) throw new DeploymentError('MULTIPLE_INITIAL_UNITS', 'Somente uma unidade pode ser inicial.', { statusCode: 400, stage: 'validation' });
