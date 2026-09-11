@@ -15,6 +15,7 @@ export const retryUnit = handler((req) => service.retryUnit(req.params.deploymen
 export const runUnit = handler((req) => service.runUnit(req.params.deploymentId, req.params.unitId, key(req)), 202);
 export const activateShadow = handler((req) => service.activateUnitShadow(req.params.deploymentId, req.params.unitId, key(req)), 202);
 export const activateTenants = handler((req) => service.activateTenants(req.params.deploymentId, actor(req), key(req)), 202);
+export const provisionStorefronts = handler((req) => service.provisionStorefronts(req.params.deploymentId, actor(req), key(req)), 202);
 export const cancel = handler((req) => service.cancelDeployment(req.params.deploymentId, actor(req)), 202);
 export const presignAssets = handler((req) => service.presignDeploymentAssets(req.params.deploymentId, req.body?.assets || []));
 export const confirmAsset = handler((req) => service.confirmDeploymentAsset(req.params.deploymentId, req.body || {}));

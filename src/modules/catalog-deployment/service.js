@@ -8,8 +8,10 @@ import { DeploymentError, publicError } from './errors.js';
 import { ASSET_TYPES, canonicalHash, validateCreatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
 import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from './tenant-routing.js';
+import { buildStorefrontDomain } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
+import * as vercel from './adapters/vercel.client.js';
 
 const streams = new EventEmitter(); streams.setMaxListeners(500);
 const ACTIVE_JOBS = new Set(['pending', 'claimed', 'processing', 'cancelling', 'paused']);
@@ -294,15 +296,155 @@ export async function retryUnit(deploymentId, unitId, actor) {
   await event(deploymentId, 'unit_retry_requested', { unitId, fromStatus: unit.status, toStatus: resume, createdBy: actor }); return getDeployment(deploymentId);
 }
 
+async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
+  const target = catalogTargets(deployment.environment).storefront;
+  if (!target.enabled) return { enabled: false, domains: [] };
+  let firstError = null;
+  const domains = [];
+  for (const unit of deployment.units) {
+    try {
+      if (unit.status !== 'active' || !unit.unicommerceTenantId) {
+        throw new DeploymentError('STOREFRONT_NOT_READY', 'O tenant precisa estar ativo antes da publicação do storefront.', {
+          statusCode: 409, stage: 'provisioning_storefront', unitId: unit.id,
+          action: 'Conclua a ativação do tenant e tente novamente.',
+        });
+      }
+      const domain = buildStorefrontDomain({
+        username: deployment.username,
+        unit,
+        prefix: target.domainPrefix,
+        suffix: target.domainSuffix,
+      });
+      if (unit.storefrontDomain && unit.storefrontDomain !== domain) {
+        throw new DeploymentError('DOMAIN_TENANT_MISMATCH', 'A unidade já possui outro domínio de storefront registrado.', {
+          statusCode: 409, stage: 'provisioning_storefront', unitId: unit.id,
+          action: 'Revise a associação persistida antes de repetir.',
+        });
+      }
+      const owner = await prisma.clientDeploymentUnit.findUnique({ where: { storefrontDomain: domain }, select: { id: true } });
+      if (owner && owner.id !== unit.id) {
+        throw new DeploymentError('STOREFRONT_DOMAIN_CONFLICT', 'O domínio gerado já pertence a outra unidade.', {
+          statusCode: 409, stage: 'provisioning_storefront', unitId: unit.id,
+          action: 'Ajuste o usuário ou o código da unidade antes de repetir.',
+        });
+      }
+      await prisma.clientDeploymentUnit.update({
+        where: { id: unit.id },
+        data: { storefrontDomain: domain, storefrontStatus: 'configuring_tenant' },
+      });
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_storefront_domain',
+        () => commerce.configureStorefrontDomain(
+          catalogTargets(deployment.environment).unicommerce,
+          unit.unicommerceTenantId,
+          domain,
+          unit.id,
+        ), {
+          idempotencyKey: `${deployment.id}:${unit.id}:storefront-tenant:${idempotencyKey}`,
+          request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, domain },
+          response: (tenant) => ({ tenantId: String(tenant.id), domain: tenant.storefrontDomain, status: tenant.status }),
+        });
+      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'assigning_alias' } });
+      const aliasResult = await trackedStep(deployment.id, unit.id, 'vercel_assign_storefront_alias',
+        () => vercel.ensureProjectAlias(target.vercel, domain, unit.id), {
+          idempotencyKey: `${deployment.id}:${unit.id}:vercel-alias:${idempotencyKey}`,
+          request: { environment: deployment.environment, projectId: target.vercel.projectId, domain },
+          response: (value) => ({
+            projectId: target.vercel.projectId,
+            deploymentId: value.deployment.uid,
+            domain: value.alias.alias || domain,
+          }),
+        });
+      await prisma.clientDeploymentUnit.update({
+        where: { id: unit.id },
+        data: {
+          storefrontStatus: 'validating',
+          vercelProjectId: target.vercel.projectId,
+          vercelDeploymentId: aliasResult.deployment.uid,
+          domainVerifiedAt: new Date(),
+        },
+      });
+      await trackedStep(deployment.id, unit.id, 'storefront_validate_identity',
+        () => vercel.validateStorefrontIdentity(target, domain, unit.unicommerceTenantId, unit.id), {
+          request: { environment: deployment.environment, domain, tenantId: unit.unicommerceTenantId },
+          response: (identity) => ({ domain: identity.domain, tenantId: identity.tenantId, status: identity.status }),
+        });
+      await prisma.clientDeploymentUnit.update({
+        where: { id: unit.id },
+        data: {
+          storefrontStatus: 'ready',
+          storefrontValidatedAt: new Date(),
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          retryable: false,
+        },
+      });
+      domains.push({ unitId: unit.id, tenantId: unit.unicommerceTenantId, domain, status: 'ready' });
+      await event(deployment.id, 'storefront_ready', {
+        unitId: unit.id, toStatus: 'ready', createdBy: actor,
+        metadata: { domain, tenantId: unit.unicommerceTenantId, projectId: target.vercel.projectId },
+      });
+    } catch (error) {
+      const exposed = publicError(error, { deploymentId: deployment.id, unitId: unit.id });
+      await prisma.clientDeploymentUnit.update({
+        where: { id: unit.id },
+        data: { storefrontStatus: 'failed', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable },
+      });
+      await event(deployment.id, 'storefront_failed', {
+        unitId: unit.id, toStatus: 'failed', createdBy: actor, metadata: exposed,
+      });
+      firstError ||= error;
+    }
+  }
+  if (firstError) throw firstError;
+  return { enabled: true, domains };
+}
+
 export async function activateTenants(id, actor, idempotencyKey) {
   if (!idempotencyKey) throw new DeploymentError('IDEMPOTENCY_KEY_REQUIRED', 'O header Idempotency-Key é obrigatório.', { statusCode: 400 });
   const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
   if (!deployment.units.every((unit) => ['awaiting_activation', 'active'].includes(unit.status)) || !deployment.assets.every((asset) => asset.status === 'confirmed')) throw new DeploymentError('ACTIVATION_NOT_READY', 'A implantação ainda não cumpre todos os critérios de ativação.', { statusCode: 409, stage: 'activating_tenants' });
-  const snapshot = { approvedAt: new Date().toISOString(), approvedBy: actor, units: deployment.units.map((unit) => ({ id: unit.id, tenantId: unit.unicommerceTenantId, hubSellerUnitId: String(unit.hubSellerUnitId), bancoUnicoImportJobId: unit.bancoUnicoImportJobId })) };
   const targets = catalogTargets(deployment.environment);
+  const snapshot = { approvedAt: new Date().toISOString(), approvedBy: actor, units: deployment.units.map((unit) => ({ id: unit.id, tenantId: unit.unicommerceTenantId, hubSellerUnitId: String(unit.hubSellerUnitId), bancoUnicoImportJobId: unit.bancoUnicoImportJobId, storefrontDomain: targets.storefront.enabled ? buildStorefrontDomain({ username: deployment.username, unit, prefix: targets.storefront.domainPrefix, suffix: targets.storefront.domainSuffix }) : null })) };
   for (const unit of deployment.units.filter((item) => item.status !== 'active')) { const stepKey = `${id}:${unit.id}:${idempotencyKey}`; await trackedStep(id, unit.id, 'unicommerce_activate_tenant', () => commerce.activateTenant(targets.unicommerce, unit.unicommerceTenantId, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId } }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'active' } }); await event(id, 'unit_activated', { unitId: unit.id, fromStatus: unit.status, toStatus: 'active', createdBy: actor }); }
-  await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: snapshot, activatedAt: new Date(), activatedBy: actor, finishedAt: new Date() } }); await event(id, 'tenants_activated', { toStatus: 'completed', metadata: snapshot, createdBy: actor }); return getDeployment(id);
+  const activatedDeployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
+  try {
+    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: targets.storefront.enabled ? 'provisioning_storefront' : 'activating_tenants', activationSnapshot: snapshot, activatedAt: new Date(), activatedBy: actor } });
+    const storefront = await provisionStorefrontUnits(activatedDeployment, actor, idempotencyKey);
+    const completedSnapshot = { ...snapshot, storefront: storefront.domains };
+    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: completedSnapshot, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
+    await event(id, 'tenants_activated', { toStatus: 'completed', metadata: completedSnapshot, createdBy: actor });
+    return getDeployment(id);
+  } catch (error) {
+    const exposed = publicError(error, { deploymentId: id });
+    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
+    throw error;
+  }
+}
+
+export async function provisionStorefronts(id, actor, idempotencyKey) {
+  if (!idempotencyKey) throw new DeploymentError('IDEMPOTENCY_KEY_REQUIRED', 'O header Idempotency-Key é obrigatório.', { statusCode: 400 });
+  const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
+  if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
+  const target = catalogTargets(deployment.environment).storefront;
+  if (!target.enabled) throw new DeploymentError('STOREFRONT_PROVISIONING_DISABLED', 'A automação do storefront está desativada.', {
+    statusCode: 503, stage: 'configuration', action: 'Ative STOREFRONT_PROVISIONING_ENABLED no servidor.',
+  });
+  if (!deployment.units.every((unit) => unit.status === 'active')) throw new DeploymentError('STOREFRONT_NOT_READY', 'Todos os tenants precisam estar ativos antes da publicação do storefront.', {
+    statusCode: 409, stage: 'provisioning_storefront', action: 'Conclua a ativação dos tenants antes de repetir.',
+  });
+  await prisma.clientDeployment.update({ where: { id }, data: { currentStage: 'provisioning_storefront', lastErrorCode: null, lastErrorMessage: null, retryable: false } });
+  try {
+    const storefront = await provisionStorefrontUnits(deployment, actor, idempotencyKey);
+    const currentSnapshot = deployment.activationSnapshot && typeof deployment.activationSnapshot === 'object' ? deployment.activationSnapshot : {};
+    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: { ...currentSnapshot, storefront: storefront.domains }, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
+    await event(id, 'storefronts_provisioned', { toStatus: 'completed', createdBy: actor, metadata: { domains: storefront.domains } });
+    return getDeployment(id);
+  } catch (error) {
+    const exposed = publicError(error, { deploymentId: id });
+    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
+    throw error;
+  }
 }
 
 export async function runUnit(deploymentId, unitId, idempotencyKey) {

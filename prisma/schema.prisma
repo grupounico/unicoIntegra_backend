@@ -303,6 +303,12 @@ model ClientDeploymentUnit {
   unicommerceTenantId      String?                 @db.VarChar(255)
   clientId                 Int?
   bancoUnicoImportJobId    Int?
+  storefrontDomain         String?                 @unique @db.VarChar(253)
+  storefrontStatus         String?                 @db.VarChar(40)
+  vercelProjectId          String?                 @db.VarChar(255)
+  vercelDeploymentId       String?                 @db.VarChar(255)
+  domainVerifiedAt         DateTime?               @db.Timestamp(6)
+  storefrontValidatedAt    DateTime?               @db.Timestamp(6)
   lastErrorCode            String?                 @db.VarChar(100)
   lastErrorMessage         String?
   retryable                Boolean                 @default(false)
@@ -315,6 +321,7 @@ model ClientDeploymentUnit {
   @@unique([hubSellerUnitId])
   @@index([deploymentId, status])
   @@index([bancoUnicoImportJobId])
+  @@index([storefrontStatus])
   @@map("client_deployment_units")
   @@schema("sistema")
 }

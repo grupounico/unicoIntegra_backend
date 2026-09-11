@@ -13,6 +13,7 @@ router.post('/:deploymentId/units/:unitId/retry', controller.retryUnit);
 router.post('/:deploymentId/units/:unitId/run', controller.runUnit);
 router.post('/:deploymentId/units/:unitId/activate-shadow', controller.activateShadow);
 router.post('/:deploymentId/activate-tenants', controller.activateTenants);
+router.post('/:deploymentId/provision-storefronts', controller.provisionStorefronts);
 router.post('/:deploymentId/cancel', controller.cancel);
 router.post('/:deploymentId/assets/presign', controller.presignAssets);
 router.post('/:deploymentId/assets/confirm', controller.confirmAsset);
