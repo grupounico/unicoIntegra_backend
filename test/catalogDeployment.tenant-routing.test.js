@@ -24,8 +24,10 @@ test('retry com tenant existente volta para reconciliacao do Unicommerce', () =>
   assert.equal(resumableUnitStatus({}), 'pending');
 });
 
-test('repete job falho somente depois de uma nova validacao do Unicommerce', () => {
-  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'failed'), true);
-  assert.equal(shouldRetryBancoUnicoJob('banco_unico_importing', 'failed'), false);
-  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'processing'), false);
+test('repete job falho ou concluido com erros somente depois de uma nova validacao do Unicommerce', () => {
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'failed', 0), true);
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'completed', 1), true);
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'completed', 0), false);
+  assert.equal(shouldRetryBancoUnicoJob('banco_unico_importing', 'failed', 0), false);
+  assert.equal(shouldRetryBancoUnicoJob('unicommerce_ready', 'processing', 0), false);
 });

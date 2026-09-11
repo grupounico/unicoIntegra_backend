@@ -1706,6 +1706,7 @@ export async function retryBancoUnicoImportJob(jobId, requestedBy = 'Sistema') {
       clientId: true,
       clientName: true,
       status: true,
+      totalErrors: true,
       options: true,
     },
   });
@@ -1714,8 +1715,9 @@ export async function retryBancoUnicoImportJob(jobId, requestedBy = 'Sistema') {
     throw new Error('Importacao nao encontrada.');
   }
 
-  if (job.status !== 'failed') {
-    throw new Error('Apenas importacoes com falha podem ser executadas novamente.');
+  const completedWithErrors = job.status === 'completed' && Number(job.totalErrors) > 0;
+  if (job.status !== 'failed' && !completedWithErrors) {
+    throw new Error('Apenas importacoes com falha ou concluidas com erros podem ser executadas novamente.');
   }
 
   if (hasAnotherActiveJobForClient({ jobId: id, clientId: job.clientId, clientName: job.clientName })) {

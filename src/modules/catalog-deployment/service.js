@@ -235,7 +235,7 @@ async function importBancoUnico(deployment, units) {
         current = await prisma.clientDeploymentUnit.update({ where: { id: current.id }, data: { bancoUnicoImportJobId: job.id, status: 'banco_unico_importing' } });
       }
       let job = await getBancoUnicoImportJob(current.bancoUnicoImportJobId);
-      if (shouldRetryBancoUnicoJob(unit.status, job.status)) {
+      if (shouldRetryBancoUnicoJob(unit.status, job.status, job.totalErrors)) {
         job = await trackedStep(deployment.id, unit.id, 'banco_unico_retry_import', () => retryBancoUnicoImportJob(current.bancoUnicoImportJobId, deployment.requestedBy), {
           request: { jobId: current.bancoUnicoImportJobId, clientId: current.clientId },
           response: (value) => ({ jobId: value.id, status: value.status }),
