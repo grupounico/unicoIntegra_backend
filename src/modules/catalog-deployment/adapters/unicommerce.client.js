@@ -18,6 +18,10 @@ export async function getTenant(target, tenantId, unitId) {
   try { return (await client(target).get(`/api/tenants/${tenantId}`)).data; }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'validating_unicommerce', unitId); }
 }
+export async function configureTenantCatalogSource(target, tenantId, erpConfig, unitId) {
+  try { return (await client(target).patch(`/api/tenants/${tenantId}`, { erpConfig })).data; }
+  catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'provisioning_unicommerce', unitId); }
+}
 export async function validateTenantCatalog(target, tenantId, unitId) {
   try { await withRetry(() => client(target).get('/api/v1/catalog/products', { headers: { 'X-Tenant-Id': tenantId }, params: { page: 1, pageSize: 1 } })); }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'validating_unicommerce', unitId); }
