@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "postinstall": "prisma generate",
     "test": "node --test test/*.test.js",
     "test:catalog:e2e": "node test/catalogDeployment.e2e.mjs",
     "dev": "nodemon --ignore builds-temporarios --ignore node_modules --ignore src/data/ai-template-workspaces.json src/server.js",
