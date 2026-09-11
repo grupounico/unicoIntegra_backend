@@ -2,12 +2,12 @@ import { EventEmitter } from 'node:events';
 import { prisma } from '../../../prisma/PrismaClient.js';
 import { env } from '../../config/env.js';
 import { createClient, listClients } from '../../services/clients.service.js';
-import { createBancoUnicoImportJob, getBancoUnicoImportJob } from '../../services/bancoUnicoImports.service.js';
+import { createBancoUnicoImportJob, getBancoUnicoImportJob, retryBancoUnicoImportJob } from '../../services/bancoUnicoImports.service.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError, publicError } from './errors.js';
 import { ASSET_TYPES, canonicalHash, validateCreatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
-import { buildTenantErpConfig, resumableUnitStatus } from './tenant-routing.js';
+import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from './tenant-routing.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 
@@ -234,7 +234,14 @@ async function importBancoUnico(deployment, units) {
         if (activeJob) await event(deployment.id, 'banco_unico_import_reconciled', { unitId: unit.id, metadata: { jobId: activeJob.id, status: activeJob.status } });
         current = await prisma.clientDeploymentUnit.update({ where: { id: current.id }, data: { bancoUnicoImportJobId: job.id, status: 'banco_unico_importing' } });
       }
-      const job = await getBancoUnicoImportJob(current.bancoUnicoImportJobId);
+      let job = await getBancoUnicoImportJob(current.bancoUnicoImportJobId);
+      if (shouldRetryBancoUnicoJob(unit.status, job.status)) {
+        job = await trackedStep(deployment.id, unit.id, 'banco_unico_retry_import', () => retryBancoUnicoImportJob(current.bancoUnicoImportJobId, deployment.requestedBy), {
+          request: { jobId: current.bancoUnicoImportJobId, clientId: current.clientId },
+          response: (value) => ({ jobId: value.id, status: value.status }),
+        });
+        await event(deployment.id, 'banco_unico_import_retry_requested', { unitId: unit.id, metadata: { jobId: current.bancoUnicoImportJobId } });
+      }
       await eventIfChanged(deployment.id, 'banco_unico_import_progress', unit.id, { jobId: current.bancoUnicoImportJobId, status: job.status, totalItems: Number(job.totalItems || 0), totalProcessed: Number(job.totalProcessed || 0), totalPublished: Number(job.totalPublished || 0), totalErrors: Number(job.totalErrors || 0) });
       if (ACTIVE_JOBS.has(job.status)) { waiting = true; continue; }
       if (job.status !== 'completed') throw new DeploymentError('BANCO_UNICO_IMPORT_FAILED', 'A importação no Banco Único falhou.', { stage: 'importing_banco_unico', unitId: unit.id });

@@ -12,9 +12,12 @@ export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig =
 
 export function resumableUnitStatus(unit) {
   if (unit.hubIntegrationId) {
-    if (unit.bancoUnicoImportJobId) return 'banco_unico_importing';
     if (unit.unicommerceTenantId) return 'catalog_active';
     return 'scheduled';
   }
   return unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';
+}
+
+export function shouldRetryBancoUnicoJob(unitStatus, jobStatus) {
+  return unitStatus === 'unicommerce_ready' && jobStatus === 'failed';
 }
