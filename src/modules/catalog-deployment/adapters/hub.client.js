@@ -59,8 +59,8 @@ export async function activateSnapshot(target, apiKey, integrationId, unitId, id
 
 export async function validateCatalog(target, apiKey, sellerUnitId, unitId) {
   try {
-    const response = await withRetry(() => sellerClient(target, apiKey).get('/api/v1/catalog/products', { params: { sellerUnitId, page: 1, pageSize: 1 } }));
-    const products = response.data?.products || response.data?.data || response.data;
+    const response = await withRetry(() => sellerClient(target, apiKey).get(`/api/v1/produtos/unidades/${sellerUnitId}/catalogo`, { params: { offset: 0, limit: 1 } }));
+    const products = response.data?.produtos || response.data?.products || response.data?.data;
     if (!Array.isArray(products) || products.length === 0) throw new DeploymentError('HUB_EMPTY_CATALOG', 'O Hub não retornou itens para a unidade.', { statusCode: 422, stage: 'validating_hub_catalog', unitId, action: 'Revise a carga e o vínculo da unidade.' });
   } catch (error) { if (error instanceof DeploymentError) throw error; throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId); }
 }

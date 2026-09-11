@@ -68,7 +68,11 @@ const hubServer = await server(56100, async (req, res) => {
     return json(res, 200, [{ integrationId: 23, latestRun: { runId: 'run-1', status: 'shadow', validRows: 1, finishedAt: new Date().toISOString() } }]);
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/activate') return json(res, 200, { status: 'automatic' });
-  if (req.method === 'GET' && url.pathname === '/api/v1/catalog/products') return json(res, 200, { products: [{ ean: '7891000053508' }] });
+  if (req.method === 'GET' && url.pathname === '/api/v1/produtos/unidades/10/catalogo') {
+    assert.equal(url.searchParams.get('offset'), '0');
+    assert.equal(url.searchParams.get('limit'), '1');
+    return json(res, 200, { status: 'ok', produtos: [{ ean: '7891000053508' }], pagination: { offset: 0, limit: 1, hasNext: true, nextOffset: 1 } });
+  }
   return json(res, 404, { error: 'mock route not found' });
 });
 
