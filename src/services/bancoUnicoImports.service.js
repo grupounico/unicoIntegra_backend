@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Prisma } from '@prisma/client';
+import prismaClientPackage from '@prisma/client';
 import { prisma } from '../../prisma/PrismaClient.js';
 import { createLogService } from './logs.services.js';
 import { getClientWithCredential } from './clients.service.js';
@@ -26,6 +26,8 @@ import {
   chunk,
   pickFirstString,
 } from '../modules/banco-unico-import/runtime/utils/text.js';
+
+const { Prisma } = prismaClientPackage;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
