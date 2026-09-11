@@ -12,8 +12,11 @@ import * as commerce from './adapters/unicommerce.client.js';
 
 const streams = new EventEmitter(); streams.setMaxListeners(500);
 const ACTIVE_JOBS = new Set(['pending', 'claimed', 'processing', 'cancelling', 'paused']);
-const RUN_SUCCESS = new Set(['completed', 'success', 'succeeded', 'finished']);
-const RUN_FAILURE = new Set(['failed', 'error', 'cancelled']);
+// Hub Unico persists shadow as the terminal success state when the integration
+// uses publicationMode=shadow. Published is the corresponding terminal state
+// after activation/for automatic integrations.
+const RUN_SUCCESS = new Set(['shadow', 'published', 'completed', 'success', 'succeeded', 'finished']);
+const RUN_FAILURE = new Set(['failed', 'rejected', 'error', 'cancelled']);
 const UNIT_PROGRESS = {
   pending: 0, hub_unit_created: 10, integration_created: 20, scheduled: 25,
   running: 35, shadow_ready: 45, catalog_active: 55,
@@ -128,7 +131,7 @@ export async function startDeployment(id, actor) {
   const missing = deployment.assets.filter((asset) => asset.status !== 'confirmed');
   if (missing.length) throw new DeploymentError('ASSET_MISSING', `Confirme os assets: ${missing.map((item) => item.type).join(', ')}.`, { statusCode: 409, stage: 'assets', action: 'Envie e confirme os cinco arquivos antes de iniciar.' });
   if (!['draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required'].includes(deployment.status)) return getDeployment(id);
-  await prisma.clientDeployment.update({ where: { id }, data: { status: 'queued', currentStage: 'queued', lastErrorCode: null, lastErrorMessage: null, retryable: false } });
+  await prisma.clientDeployment.update({ where: { id }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   await event(id, 'deployment_queued', { fromStatus: deployment.status, toStatus: 'queued', createdBy: actor });
   return getDeployment(id);
 }
@@ -277,7 +280,7 @@ export async function retryDeployment(id, actor) {
 export async function retryUnit(deploymentId, unitId, actor) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } }); if (!unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
   const resume = unit.hubIntegrationId ? unit.unicommerceTenantId ? unit.bancoUnicoImportJobId ? 'banco_unico_importing' : 'unicommerce_ready' : 'scheduled' : unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';
-  await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued' } });
+  await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   await event(deploymentId, 'unit_retry_requested', { unitId, fromStatus: unit.status, toStatus: resume, createdBy: actor }); return getDeployment(deploymentId);
 }
 
@@ -300,7 +303,7 @@ export async function runUnit(deploymentId, unitId, idempotencyKey) {
   if (!unit.hubIntegrationId || !deployment.sellerApiKeyEncrypted) throw new DeploymentError('HUB_INTEGRATION_NOT_READY', 'A integração do Hub ainda não foi criada.', { statusCode: 409, stage: 'scheduling_sync', unitId });
   await hub.scheduleRun(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
   await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'scheduled', latestRunStatus: 'scheduled', lastErrorCode: null, lastErrorMessage: null } });
-  await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued' } }); return getDeployment(deploymentId);
+  await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } }); return getDeployment(deploymentId);
 }
 
 export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {

@@ -65,7 +65,7 @@ const hubServer = await server(56100, async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled' });
   if (req.method === 'GET' && url.pathname === '/api/v1/integration/catalog-sync') {
     assert.equal(integrationCreated, true);
-    return json(res, 200, [{ integrationId: 23, latestRun: { runId: 'run-1', status: 'completed', validRows: 1, finishedAt: new Date().toISOString() } }]);
+    return json(res, 200, [{ integrationId: 23, latestRun: { runId: 'run-1', status: 'shadow', validRows: 1, finishedAt: new Date().toISOString() } }]);
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/activate') return json(res, 200, { status: 'automatic' });
   if (req.method === 'GET' && url.pathname === '/api/v1/catalog/products') return json(res, 200, { products: [{ ean: '7891000053508' }] });
