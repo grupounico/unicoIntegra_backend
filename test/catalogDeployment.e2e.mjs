@@ -93,6 +93,8 @@ const commerceServer = await server(56101, async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/tenants') {
     const payload = await body(req);
     assert.equal(payload.erpConfig.unidadeId, 10);
+    assert.equal(payload.erpConfig.baseUrl, 'http://127.0.0.1:56100');
+    assert.equal(payload.erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
     assert.equal(payload.status, 'inactive');
     const tenant = { ...payload, id: 'tenant-1', hasErpCredentials: true };
     delete tenant.erpCredentials;
@@ -102,6 +104,11 @@ const commerceServer = await server(56101, async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/tenants/tenant-1') return json(res, 200, tenants.get('tenant-1'));
   if (req.method === 'PATCH' && url.pathname === '/api/tenants/tenant-1') {
     const payload = await body(req);
+    if (payload.erpConfig) {
+      assert.equal(payload.erpConfig.unidadeId, 10);
+      assert.equal(payload.erpConfig.baseUrl, 'http://127.0.0.1:56100');
+      assert.equal(payload.erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
+    }
     const tenant = { ...tenants.get('tenant-1'), ...payload };
     tenants.set('tenant-1', tenant);
     return json(res, 200, tenant);
@@ -211,6 +218,8 @@ try {
   assert.equal(activated.body.progress.percent, 100);
   assert.equal(activated.body.progress.completedUnits, 1);
   assert.equal(tenants.get('tenant-1').status, 'active');
+  assert.equal(tenants.get('tenant-1').erpConfig.baseUrl, 'http://127.0.0.1:56100');
+  assert.equal(tenants.get('tenant-1').erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
   const timeline = await api(`/api/v1/deployments/${deploymentId}/events?pageSize=200`);
   assert.equal(timeline.status, 200);
   assert.ok(timeline.body.meta.totalItems > 10);

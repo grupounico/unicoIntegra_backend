@@ -7,6 +7,7 @@ import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError, publicError } from './errors.js';
 import { ASSET_TYPES, canonicalHash, validateCreatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
+import { buildTenantErpConfig, resumableUnitStatus } from './tenant-routing.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 
@@ -190,12 +191,14 @@ async function provisionCommerce(deployment, units, assets) {
   for (const unit of units.filter((item) => item.status === 'catalog_active')) {
     try {
       let tenant = unit.unicommerceTenantId ? await commerce.getTenant(targets.unicommerce, unit.unicommerceTenantId, unit.id) : await commerce.findTenantByHubUnit(targets.unicommerce, unit.hubSellerUnitId);
+      const requiredErpConfig = buildTenantErpConfig(targets.hub, unit.hubSellerUnitId, tenant?.erpConfig);
       if (tenant) await event(deployment.id, 'unicommerce_tenant_reconciled', { unitId: unit.id, metadata: { tenantId: String(tenant.id), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       if (tenant && Number(tenant.hubSellerUnitId) !== Number(unit.hubSellerUnitId)) throw new DeploymentError('UNICOMMERCE_INVALID_UNIT_MAPPING', 'O tenant existente pertence a outra unidade.', { statusCode: 409, stage: 'provisioning_unicommerce', unitId: unit.id });
-      if (!tenant) { const stepKey = `${deployment.id}:${unit.id}:tenant`; tenant = await trackedStep(deployment.id, unit.id, 'unicommerce_create_tenant', () => commerce.createTenant(targets.unicommerce, { slug: unit.slug, name: unit.name, hubSellerId: Number(deployment.hubSellerId), hubSellerUnitId: Number(unit.hubSellerUnitId), deploymentId: deployment.id, erpProvider: 'alpha7', erpConfig: { unidadeId: Number(unit.hubSellerUnitId), inStock: true }, erpCredentials: { hubUnicoApiKey: apiKey }, status: 'inactive' }, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, slug: unit.slug, provider: 'alpha7', hubSellerUnitId: String(unit.hubSellerUnitId), status: 'inactive', hasCredential: true }, response: (value) => ({ tenantId: String(value.id) }) }); }
+      if (!tenant) { const stepKey = `${deployment.id}:${unit.id}:tenant`; tenant = await trackedStep(deployment.id, unit.id, 'unicommerce_create_tenant', () => commerce.createTenant(targets.unicommerce, { slug: unit.slug, name: unit.name, hubSellerId: Number(deployment.hubSellerId), hubSellerUnitId: Number(unit.hubSellerUnitId), deploymentId: deployment.id, erpProvider: 'alpha7', erpConfig: requiredErpConfig, erpCredentials: { hubUnicoApiKey: apiKey }, status: 'inactive' }, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, slug: unit.slug, provider: 'alpha7', hubSellerUnitId: String(unit.hubSellerUnitId), status: 'inactive', hasCredential: true }, response: (value) => ({ tenantId: String(value.id) }) }); }
       const tenantId = tenant.id; await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { unicommerceTenantId: String(tenantId), status: 'unicommerce_tenant_created' } });
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath } });
       const confirmed = await trackedStep(deployment.id, unit.id, 'unicommerce_validate_tenant', () => commerce.getTenant(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId) }, response: (value) => ({ tenantId: String(value.id), status: value.status, hasCredential: value.hasErpCredentials === true }) });
-      if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
+      if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.erpConfig?.baseUrl !== requiredErpConfig.baseUrl || confirmed.erpConfig?.requestPath !== requiredErpConfig.requestPath || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding) } });
       await trackedStep(deployment.id, unit.id, 'unicommerce_validate_catalog', () => commerce.validateTenantCatalog(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'unicommerce_ready' } });
@@ -272,14 +275,14 @@ export async function retryDeployment(id, actor) {
   const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
   for (const unit of deployment.units.filter((item) => ['failed', 'reconciliation_required'].includes(item.status))) {
-    const resume = unit.hubIntegrationId ? unit.unicommerceTenantId ? unit.bancoUnicoImportJobId ? 'banco_unico_importing' : 'unicommerce_ready' : 'scheduled' : unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';
+    const resume = resumableUnitStatus(unit);
     await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   }
   return startDeployment(id, actor);
 }
 export async function retryUnit(deploymentId, unitId, actor) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } }); if (!unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
-  const resume = unit.hubIntegrationId ? unit.unicommerceTenantId ? unit.bancoUnicoImportJobId ? 'banco_unico_importing' : 'unicommerce_ready' : 'scheduled' : unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';
+  const resume = resumableUnitStatus(unit);
   await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   await event(deploymentId, 'unit_retry_requested', { unitId, fromStatus: unit.status, toStatus: resume, createdBy: actor }); return getDeployment(deploymentId);
 }
