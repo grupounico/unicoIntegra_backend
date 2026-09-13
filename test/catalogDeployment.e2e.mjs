@@ -47,6 +47,7 @@ function server(port, handler) {
 }
 
 const tenants = new Map();
+const orderWebhookUrl = 'https://cliente.example/webhook/order-token-sensitive';
 let integrationCreated = false;
 const hubServer = await server(56100, async (req, res) => {
   const url = new URL(req.url, 'http://local');
@@ -95,6 +96,7 @@ const commerceServer = await server(56101, async (req, res) => {
     assert.equal(payload.erpConfig.unidadeId, 10);
     assert.equal(payload.erpConfig.baseUrl, 'http://127.0.0.1:56100');
     assert.equal(payload.erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
+    assert.equal(payload.erpConfig.orderWebhookUrl, orderWebhookUrl);
     assert.equal(payload.status, 'inactive');
     const tenant = { ...payload, id: 'tenant-1', hasErpCredentials: true };
     delete tenant.erpCredentials;
@@ -108,6 +110,7 @@ const commerceServer = await server(56101, async (req, res) => {
       assert.equal(payload.erpConfig.unidadeId, 10);
       assert.equal(payload.erpConfig.baseUrl, 'http://127.0.0.1:56100');
       assert.equal(payload.erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
+      assert.equal(payload.erpConfig.orderWebhookUrl, orderWebhookUrl);
     }
     const tenant = { ...tenants.get('tenant-1'), ...payload };
     tenants.set('tenant-1', tenant);
@@ -168,11 +171,14 @@ try {
       cnpj: '11222333000181',
       sourceUnitId: 1,
       credentialRef: 'postgresql://postgres:catalog_test@127.0.0.1:55432/unico_integra_test',
+      orderWebhookUrl,
     }],
   };
   const created = await api('/api/v1/deployments', { method: 'POST', headers: { 'Idempotency-Key': 'catalog-e2e-1' }, body: JSON.stringify(createPayload) });
   assert.equal(created.status, 202);
   assert.equal(JSON.stringify(created.body).includes('catalog_test'), false);
+  assert.equal(created.body.units[0].hasOrderWebhookUrl, true);
+  assert.equal(JSON.stringify(created.body).includes(orderWebhookUrl), false);
   const deploymentId = created.body.id;
 
   const duplicate = await api('/api/v1/deployments', { method: 'POST', headers: { 'Idempotency-Key': 'catalog-e2e-1' }, body: JSON.stringify(createPayload) });
@@ -210,6 +216,7 @@ try {
   assert.ok(publishedProducts > 0);
   assert.equal(JSON.stringify(deployment).includes('seller-secret'), false);
   assert.equal(JSON.stringify(deployment).includes('catalog_test'), false);
+  assert.equal(JSON.stringify(deployment).includes(orderWebhookUrl), false);
 
   const activated = await api(`/api/v1/deployments/${deploymentId}/activate-tenants`, { method: 'POST', headers: { 'Idempotency-Key': 'activate-1' }, body: JSON.stringify({ requestedBy: 'Teste E2E' }) });
   assert.equal(activated.status, 202);
@@ -220,6 +227,7 @@ try {
   assert.equal(tenants.get('tenant-1').status, 'active');
   assert.equal(tenants.get('tenant-1').erpConfig.baseUrl, 'http://127.0.0.1:56100');
   assert.equal(tenants.get('tenant-1').erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
+  assert.equal(tenants.get('tenant-1').erpConfig.orderWebhookUrl, orderWebhookUrl);
   const timeline = await api(`/api/v1/deployments/${deploymentId}/events?pageSize=200`);
   assert.equal(timeline.status, 200);
   assert.ok(timeline.body.meta.totalItems > 10);
@@ -227,13 +235,17 @@ try {
   assert.ok(timeline.body.data.some((item) => item.eventType === 'banco_unico_import_progress'));
   assert.equal(JSON.stringify(timeline.body).includes('seller-secret'), false);
   assert.equal(JSON.stringify(timeline.body).includes('catalog_test'), false);
+  assert.equal(JSON.stringify(timeline.body).includes(orderWebhookUrl), false);
   const verificationPool = new Pool({ connectionString: databaseUrl });
   const secretRows = await verificationPool.query('SELECT credential, "credentialEncrypted", "multiProviderApiKey", "multiProviderApiKeyEncrypted" FROM sistema.clients');
+  const deploymentUnitRows = await verificationPool.query('SELECT "orderWebhookUrlEncrypted" FROM sistema.client_deployment_units WHERE "deploymentId" = $1', [deploymentId]);
   await verificationPool.end();
   assert.equal(secretRows.rows[0].credential, null);
   assert.equal(secretRows.rows[0].multiProviderApiKey, null);
   assert.match(secretRows.rows[0].credentialEncrypted, /^v1\./);
   assert.match(secretRows.rows[0].multiProviderApiKeyEncrypted, /^v1\./);
+  assert.match(deploymentUnitRows.rows[0].orderWebhookUrlEncrypted, /^v1\./);
+  assert.equal(deploymentUnitRows.rows[0].orderWebhookUrlEncrypted.includes('order-token-sensitive'), false);
   console.log(JSON.stringify({ ok: true, deploymentId, publishedProducts, finalStatus: activated.body.status }, null, 2));
 } finally {
   apiServer.close();

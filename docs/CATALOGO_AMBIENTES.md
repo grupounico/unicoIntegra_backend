@@ -61,3 +61,26 @@ separá-los, use as variantes `VERCEL_STAGING_*` e `VERCEL_PRODUCTION_*`.
 `POST /api/v1/deployments/:deploymentId/provision-storefronts` permite retomar
 somente essa fase em uma implantação cujos tenants já estão ativos. O comando
 exige `Idempotency-Key`.
+
+## Webhook de pedidos por unidade
+
+Novas implantações devem informar `orderWebhookUrl` em cada unidade. O valor
+deve ser uma URL HTTPS e é incorporado em `erpConfig.orderWebhookUrl` antes da
+validação e ativação do tenant:
+
+```json
+{
+  "units": [
+    {
+      "codigo": "MATRIZ",
+      "orderWebhookUrl": "https://cliente.example/webhook/capture/identificador"
+    }
+  ]
+}
+```
+
+O orquestrador sempre busca o tenant e mescla o `erpConfig` atual antes do
+`PATCH`, preservando campos adicionais. O webhook é cifrado no banco do Único
+Integra e nunca aparece nas respostas públicas, snapshots de entrada, etapas
+ou eventos. A API expõe apenas `hasOrderWebhookUrl` para indicar que a unidade
+está configurada.

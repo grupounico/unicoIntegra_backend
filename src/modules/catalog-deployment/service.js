@@ -29,7 +29,16 @@ const UNIT_PROGRESS = {
 };
 
 function jsonSafe(value) { return JSON.parse(JSON.stringify(value, (_, item) => typeof item === 'bigint' ? item.toString() : item)); }
-function sanitizeSnapshot(input) { return { group: input.group, units: input.units.map(({ credentialRef, ...unit }) => ({ ...unit, hasCredential: Boolean(credentialRef) })) }; }
+function sanitizeSnapshot(input) {
+  return {
+    group: input.group,
+    units: input.units.map(({ credentialRef, orderWebhookUrl, ...unit }) => ({
+      ...unit,
+      hasCredential: Boolean(credentialRef),
+      hasOrderWebhookUrl: Boolean(orderWebhookUrl),
+    })),
+  };
+}
 function publish(deploymentId, event) { streams.emit(String(deploymentId), jsonSafe(event)); }
 
 async function event(deploymentId, eventType, { unitId = null, fromStatus = null, toStatus = null, metadata = null, createdBy = null } = {}) {
@@ -70,7 +79,11 @@ function deploymentProgress(units = []) {
 function formatDeployment(value) {
   const safe = jsonSafe(value);
   delete safe.sellerApiKeyEncrypted;
-  safe.units?.forEach((unit) => { delete unit.credentialRefEncrypted; });
+  safe.units?.forEach((unit) => {
+    unit.hasOrderWebhookUrl = Boolean(unit.orderWebhookUrlEncrypted);
+    delete unit.credentialRefEncrypted;
+    delete unit.orderWebhookUrlEncrypted;
+  });
   if (safe.events) safe.events.reverse();
   if (safe.steps) safe.steps.reverse();
   safe.progress = deploymentProgress(safe.units);
@@ -93,7 +106,7 @@ export async function createDeployment(payload, idempotencyKey, correlationId) {
     inputSnapshot: sanitizeSnapshot(normalized),
     units: { create: normalized.units.map((unit) => ({ code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug,
       isInitial: unit.initial, provider: unit.provider, sourceUnitId: unit.sourceUnitId,
-      credentialRefEncrypted: encryptSecret(unit.credentialRef), publicationMode: unit.publicationMode,
+      credentialRefEncrypted: encryptSecret(unit.credentialRef), orderWebhookUrlEncrypted: encryptSecret(unit.orderWebhookUrl), publicationMode: unit.publicationMode,
       pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps })) },
     assets: { create: ASSET_TYPES.map((type) => ({ type })) },
   }, include: includeAll() });
@@ -193,14 +206,16 @@ async function provisionCommerce(deployment, units, assets) {
   for (const unit of units.filter((item) => item.status === 'catalog_active')) {
     try {
       let tenant = unit.unicommerceTenantId ? await commerce.getTenant(targets.unicommerce, unit.unicommerceTenantId, unit.id) : await commerce.findTenantByHubUnit(targets.unicommerce, unit.hubSellerUnitId);
-      const requiredErpConfig = buildTenantErpConfig(targets.hub, unit.hubSellerUnitId, tenant?.erpConfig);
+      const orderWebhookUrl = unit.orderWebhookUrlEncrypted ? decryptSecret(unit.orderWebhookUrlEncrypted) : null;
+      if (!orderWebhookUrl) throw new DeploymentError('ORDER_WEBHOOK_URL_REQUIRED', 'A URL de recebimento de pedidos não está configurada para a unidade.', { statusCode: 409, stage: 'provisioning_unicommerce', unitId: unit.id, action: 'Informe uma URL HTTPS válida no cadastro da implantação.' });
+      const requiredErpConfig = buildTenantErpConfig(targets.hub, unit.hubSellerUnitId, tenant?.erpConfig, orderWebhookUrl);
       if (tenant) await event(deployment.id, 'unicommerce_tenant_reconciled', { unitId: unit.id, metadata: { tenantId: String(tenant.id), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       if (tenant && Number(tenant.hubSellerUnitId) !== Number(unit.hubSellerUnitId)) throw new DeploymentError('UNICOMMERCE_INVALID_UNIT_MAPPING', 'O tenant existente pertence a outra unidade.', { statusCode: 409, stage: 'provisioning_unicommerce', unitId: unit.id });
       if (!tenant) { const stepKey = `${deployment.id}:${unit.id}:tenant`; tenant = await trackedStep(deployment.id, unit.id, 'unicommerce_create_tenant', () => commerce.createTenant(targets.unicommerce, { slug: unit.slug, name: unit.name, hubSellerId: Number(deployment.hubSellerId), hubSellerUnitId: Number(unit.hubSellerUnitId), deploymentId: deployment.id, erpProvider: 'alpha7', erpConfig: requiredErpConfig, erpCredentials: { hubUnicoApiKey: apiKey }, status: 'inactive' }, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, slug: unit.slug, provider: 'alpha7', hubSellerUnitId: String(unit.hubSellerUnitId), status: 'inactive', hasCredential: true }, response: (value) => ({ tenantId: String(value.id) }) }); }
       const tenantId = tenant.id; await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { unicommerceTenantId: String(tenantId), status: 'unicommerce_tenant_created' } });
-      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath } });
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath, hasOrderWebhookUrl: true } });
       const confirmed = await trackedStep(deployment.id, unit.id, 'unicommerce_validate_tenant', () => commerce.getTenant(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId) }, response: (value) => ({ tenantId: String(value.id), status: value.status, hasCredential: value.hasErpCredentials === true }) });
-      if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.erpConfig?.baseUrl !== requiredErpConfig.baseUrl || confirmed.erpConfig?.requestPath !== requiredErpConfig.requestPath || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
+      if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.erpConfig?.baseUrl !== requiredErpConfig.baseUrl || confirmed.erpConfig?.requestPath !== requiredErpConfig.requestPath || confirmed.erpConfig?.orderWebhookUrl !== requiredErpConfig.orderWebhookUrl || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding) } });
       await trackedStep(deployment.id, unit.id, 'unicommerce_validate_catalog', () => commerce.validateTenantCatalog(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'unicommerce_ready' } });

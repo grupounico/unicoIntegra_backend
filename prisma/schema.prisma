@@ -290,6 +290,7 @@ model ClientDeploymentUnit {
   provider                 String                  @default("alpha7") @db.VarChar(30)
   sourceUnitId             Int
   credentialRefEncrypted   String
+  orderWebhookUrlEncrypted String?
   publicationMode          String                  @default("shadow") @db.VarChar(20)
   pageSize                 Int                     @default(500)
   validEanDropThresholdBps Int                     @default(1000)
