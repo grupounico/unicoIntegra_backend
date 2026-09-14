@@ -84,3 +84,12 @@ O orquestrador sempre busca o tenant e mescla o `erpConfig` atual antes do
 Integra e nunca aparece nas respostas públicas, snapshots de entrada, etapas
 ou eventos. A API expõe apenas `hasOrderWebhookUrl` para indicar que a unidade
 está configurada.
+
+## Monitoramento exato do run no Hub
+
+O agendamento `POST /api/v1/integration/catalog-sync/:integrationId/run` deve
+retornar `runId`. O Único Integra persiste esse valor antes de iniciar o
+monitoramento. Nas consultas a `GET /api/v1/integration/catalog-sync`, o
+`latestRun` só é processado quando seu `runId` coincide com o valor persistido;
+uma execução anterior é ignorada. A ativação do shadow envia o mesmo `runId` no
+corpo para impedir a publicação de outro snapshot.

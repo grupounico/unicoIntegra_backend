@@ -172,7 +172,7 @@ async function provisionHub(deployment, units) {
       let current = await prisma.clientDeploymentUnit.findUnique({ where: { id: unit.id } });
       if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, sourceUnitId: current.sourceUnitId }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
       if (!current.hubIntegrationId) { const stepKey = `${deployment.id}:${unit.id}:integration`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, decryptSecret(current.credentialRefEncrypted), stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, sourceUnitId: current.sourceUnitId, hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } }); }
-      if (current.status === 'integration_created') { const stepKey = `${deployment.id}:${unit.id}:run`; await trackedStep(deployment.id, unit.id, 'hub_schedule_run', () => hub.scheduleRun(targets.hub, apiKey, current.hubIntegrationId, current.id, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId) } }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'scheduled' } }); }
+      if (current.status === 'integration_created') { const stepKey = `${deployment.id}:${unit.id}:run`; const run = await trackedStep(deployment.id, unit.id, 'hub_schedule_run', () => hub.scheduleRun(targets.hub, apiKey, current.hubIntegrationId, current.id, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId) }, response: (value) => ({ runId: value.runId, status: value.status }) }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status } }); }
     } catch (error) { await failUnit(deployment, unit, error); }
   }
 }
@@ -184,6 +184,14 @@ async function monitorHub(deployment, units) {
   for (const unit of units.filter((item) => ['scheduled', 'running'].includes(item.status))) {
     try {
       const integration = await hub.getIntegration(targets.hub, apiKey, unit.hubIntegrationId, unit.id); const run = integration.latestRun || {};
+      const expectedRunId = unit.latestRunId ? String(unit.latestRunId) : null;
+      const observedRunId = run.runId ? String(run.runId) : null;
+      if (!expectedRunId) throw new DeploymentError('HUB_RUN_ID_MISSING', 'A execução agendada não possui um identificador para acompanhamento.', { statusCode: 409, stage: 'validating_hub_catalog', unitId: unit.id, action: 'Agende uma nova carga para obter um runId válido.' });
+      if (!hub.isExpectedRun(run, expectedRunId)) {
+        waiting = true;
+        await eventIfChanged(deployment.id, 'hub_run_waiting', unit.id, { expectedRunId, observedRunId });
+        continue;
+      }
       const status = String(run.status || 'scheduled').toLowerCase();
       if (status !== unit.latestRunStatus) await event(deployment.id, 'hub_run_status_changed', { unitId: unit.id, fromStatus: unit.latestRunStatus, toStatus: status, metadata: { runId: run.runId ? String(run.runId) : null, validRows: Number(run.validRows || 0) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: RUN_SUCCESS.has(status) ? 'shadow_ready' : RUN_FAILURE.has(status) ? 'failed' : 'running', latestRunId: run.runId ? String(run.runId) : undefined, latestRunStatus: status, latestValidRows: Number(run.validRows || 0), latestRunFinishedAt: run.finishedAt ? new Date(run.finishedAt) : undefined } });
@@ -191,7 +199,7 @@ async function monitorHub(deployment, units) {
       if (!RUN_SUCCESS.has(status)) { waiting = true; continue; }
       if (Number(run.validRows || 0) <= 0) throw new DeploymentError('HUB_EMPTY_CATALOG', 'A carga do Hub terminou sem itens válidos.', { statusCode: 422, stage: 'validating_hub_catalog', unitId: unit.id });
       const activationKey = `${deployment.id}:${unit.id}:activate-shadow`;
-      await trackedStep(deployment.id, unit.id, 'hub_activate_shadow', () => hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, unit.id, activationKey), { idempotencyKey: activationKey, request: { environment: deployment.environment, hubIntegrationId: String(unit.hubIntegrationId), validRows: Number(run.validRows || 0) } });
+      await trackedStep(deployment.id, unit.id, 'hub_activate_shadow', () => hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, expectedRunId, unit.id, activationKey), { idempotencyKey: activationKey, request: { environment: deployment.environment, hubIntegrationId: String(unit.hubIntegrationId), runId: expectedRunId, validRows: Number(run.validRows || 0) } });
       await trackedStep(deployment.id, unit.id, 'hub_validate_catalog', () => hub.validateCatalog(targets.hub, apiKey, unit.hubSellerUnitId, unit.id), { request: { environment: deployment.environment, hubSellerUnitId: String(unit.hubSellerUnitId) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'catalog_active' } });
     } catch (error) { await failUnit(deployment, unit, error); }
@@ -468,8 +476,8 @@ export async function runUnit(deploymentId, unitId, idempotencyKey) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
   if (!unit.hubIntegrationId || !deployment.sellerApiKeyEncrypted) throw new DeploymentError('HUB_INTEGRATION_NOT_READY', 'A integração do Hub ainda não foi criada.', { statusCode: 409, stage: 'scheduling_sync', unitId });
-  await hub.scheduleRun(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
-  await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'scheduled', latestRunStatus: 'scheduled', lastErrorCode: null, lastErrorMessage: null } });
+  const run = await hub.scheduleRun(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
+  await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status, latestValidRows: null, latestRunFinishedAt: null, lastErrorCode: null, lastErrorMessage: null } });
   await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } }); return getDeployment(deploymentId);
 }
 
@@ -479,7 +487,8 @@ export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
   if (unit.status !== 'shadow_ready' || Number(unit.latestValidRows || 0) <= 0) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'A unidade não possui snapshot shadow válido.', { statusCode: 409, stage: 'activating_shadow', unitId });
-  const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted); const targets = catalogTargets(deployment.environment); await hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`); await hub.validateCatalog(targets.hub, apiKey, unit.hubSellerUnitId, unitId);
+  if (!unit.latestRunId) throw new DeploymentError('HUB_RUN_ID_MISSING', 'A execução não possui um identificador para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Execute uma nova carga antes de ativar o snapshot.' });
+  const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted); const targets = catalogTargets(deployment.environment); await hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, unit.latestRunId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`); await hub.validateCatalog(targets.hub, apiKey, unit.hubSellerUnitId, unitId);
   await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'catalog_active' } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued' } }); return getDeployment(deploymentId);
 }
 

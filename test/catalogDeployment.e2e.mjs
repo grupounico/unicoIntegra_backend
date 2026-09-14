@@ -49,6 +49,7 @@ function server(port, handler) {
 const tenants = new Map();
 const orderWebhookUrl = 'https://cliente.example/webhook/order-token-sensitive';
 let integrationCreated = false;
+let integrationPolls = 0;
 const hubServer = await server(56100, async (req, res) => {
   const url = new URL(req.url, 'http://local');
   if (req.method === 'POST' && url.pathname === '/api/v1/sellers') {
@@ -63,12 +64,20 @@ const hubServer = await server(56100, async (req, res) => {
     integrationCreated = true;
     return json(res, 201, { integracao: { integrationId: 23 } });
   }
-  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled' });
+  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled', integrationId: 23, runId: 'run-1' });
   if (req.method === 'GET' && url.pathname === '/api/v1/integration/catalog-sync') {
     assert.equal(integrationCreated, true);
-    return json(res, 200, [{ integrationId: 23, latestRun: { runId: 'run-1', status: 'shadow', validRows: 1, finishedAt: new Date().toISOString() } }]);
+    integrationPolls += 1;
+    const latestRun = integrationPolls === 1
+      ? { runId: 'previous-run', status: 'published', validRows: 99, finishedAt: new Date().toISOString() }
+      : { runId: 'run-1', status: 'shadow', validRows: 1, finishedAt: new Date().toISOString() };
+    return json(res, 200, [{ integrationId: 23, latestRun }]);
   }
-  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/activate') return json(res, 200, { status: 'automatic' });
+  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/activate') {
+    const payload = await body(req);
+    assert.equal(payload.runId, 'run-1');
+    return json(res, 200, { status: 'automatic', runId: payload.runId });
+  }
   if (req.method === 'GET' && url.pathname === '/api/v1/produtos/unidades/10/catalogo') {
     assert.equal(url.searchParams.get('offset'), '0');
     assert.equal(url.searchParams.get('limit'), '1');

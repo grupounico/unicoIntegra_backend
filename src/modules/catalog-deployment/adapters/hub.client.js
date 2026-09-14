@@ -7,6 +7,10 @@ function adminClient(target) {
 }
 function sellerClient(target, apiKey) { return createHttpClient(target.baseUrl, { 'X-API-Key': apiKey }); }
 
+export function isExpectedRun(latestRun, expectedRunId) {
+  return Boolean(latestRun?.runId && expectedRunId && String(latestRun.runId) === String(expectedRunId));
+}
+
 export async function createSeller(target, group, initialUnit, idempotencyKey) {
   try {
     const response = await withRetry(() => adminClient(target).post('/api/v1/sellers', { cnpj: group.cnpj, nome: group.nome, username: group.username, unidade: { codigo: initialUnit.code, nome: initialUnit.name, cnpj: initialUnit.cnpj } }, { headers: { 'Idempotency-Key': idempotencyKey } }));
@@ -35,7 +39,12 @@ export async function createIntegration(target, apiKey, unit, credentialRef, ide
 }
 
 export async function scheduleRun(target, apiKey, integrationId, unitId, idempotencyKey) {
-  try { await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/run`, {}, { headers: { 'Idempotency-Key': idempotencyKey } })); }
+  try {
+    const response = await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/run`, {}, { headers: { 'Idempotency-Key': idempotencyKey } }));
+    const runId = response.data?.runId;
+    if (!runId) throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub não retornou o ID da execução agendada.', { stage: 'scheduling_sync', unitId });
+    return { runId: String(runId), status: String(response.data?.status || 'scheduled') };
+  }
   catch (error) { throw mapUpstreamError(error, 'HUB', 'scheduling_sync', unitId); }
 }
 
@@ -49,8 +58,8 @@ export async function getIntegration(target, apiKey, integrationId, unitId) {
   } catch (error) { throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId); }
 }
 
-export async function activateSnapshot(target, apiKey, integrationId, unitId, idempotencyKey) {
-  try { await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/activate`, {}, { headers: { 'Idempotency-Key': idempotencyKey } })); }
+export async function activateSnapshot(target, apiKey, integrationId, runId, unitId, idempotencyKey) {
+  try { await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/activate`, { runId }, { headers: { 'Idempotency-Key': idempotencyKey } })); }
   catch (error) {
     if (error.response?.status === 409) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'Não existe snapshot shadow válido para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Revise a carga e execute novamente.' });
     throw mapUpstreamError(error, 'HUB', 'activating_shadow', unitId);
