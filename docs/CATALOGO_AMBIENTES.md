@@ -61,3 +61,35 @@ separá-los, use as variantes `VERCEL_STAGING_*` e `VERCEL_PRODUCTION_*`.
 `POST /api/v1/deployments/:deploymentId/provision-storefronts` permite retomar
 somente essa fase em uma implantação cujos tenants já estão ativos. O comando
 exige `Idempotency-Key`.
+
+## Webhook de pedidos por unidade
+
+Novas implantações devem informar `orderWebhookUrl` em cada unidade. O valor
+deve ser uma URL HTTPS e é incorporado em `erpConfig.orderWebhookUrl` antes da
+validação e ativação do tenant:
+
+```json
+{
+  "units": [
+    {
+      "codigo": "MATRIZ",
+      "orderWebhookUrl": "https://cliente.example/webhook/capture/identificador"
+    }
+  ]
+}
+```
+
+O orquestrador sempre busca o tenant e mescla o `erpConfig` atual antes do
+`PATCH`, preservando campos adicionais. O webhook é cifrado no banco do Único
+Integra e nunca aparece nas respostas públicas, snapshots de entrada, etapas
+ou eventos. A API expõe apenas `hasOrderWebhookUrl` para indicar que a unidade
+está configurada.
+
+## Monitoramento exato do run no Hub
+
+O agendamento `POST /api/v1/integration/catalog-sync/:integrationId/run` deve
+retornar `runId`. O Único Integra persiste esse valor antes de iniciar o
+monitoramento. Nas consultas a `GET /api/v1/integration/catalog-sync`, o
+`latestRun` só é processado quando seu `runId` coincide com o valor persistido;
+uma execução anterior é ignorada. A ativação do shadow envia o mesmo `runId` no
+corpo para impedir a publicação de outro snapshot.

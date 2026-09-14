@@ -1,12 +1,13 @@
 export const HUB_CATALOG_LOOKUP_PATH = '/api/v1/produtos/consultar-eans';
 
-export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig = {}) {
+export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig = {}, orderWebhookUrl) {
   return {
     ...currentConfig,
     unidadeId: Number(hubSellerUnitId),
     inStock: true,
     baseUrl: String(hubTarget?.baseUrl || '').replace(/\/$/, ''),
     requestPath: HUB_CATALOG_LOOKUP_PATH,
+    orderWebhookUrl,
   };
 }
 

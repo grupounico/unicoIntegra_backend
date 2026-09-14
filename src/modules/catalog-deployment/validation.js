@@ -44,6 +44,20 @@ function requiredString(value, field, max) {
   return normalized;
 }
 
+function httpsUrl(value, field) {
+  let parsed;
+  try {
+    parsed = new URL(requiredString(value, field, 2048));
+  } catch (error) {
+    if (error instanceof DeploymentError) throw error;
+    throw new DeploymentError('INVALID_ORDER_WEBHOOK_URL', `${field} deve ser uma URL HTTPS válida.`, { statusCode: 400, stage: 'validation' });
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) {
+    throw new DeploymentError('INVALID_ORDER_WEBHOOK_URL', `${field} deve ser uma URL HTTPS válida.`, { statusCode: 400, stage: 'validation' });
+  }
+  return parsed.toString();
+}
+
 export function validateCreatePayload(payload) {
   const group = payload?.group || {};
   const groupCnpj = digits(group.cnpj);
@@ -76,7 +90,8 @@ export function validateCreatePayload(payload) {
     if (provider !== 'alpha7') throw new DeploymentError('UNSUPPORTED_PROVIDER', 'A primeira versão suporta apenas alpha7.', { statusCode: 400, stage: 'validation' });
     return { code, name: requiredString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
       credentialRef: credentialRef.toString(), provider, publicationMode: 'shadow', pageSize,
-      validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true };
+      validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true,
+      orderWebhookUrl: httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) };
   });
   if (!units.some((unit) => unit.initial)) units[0].initial = true;
   return { group: { cnpj: groupCnpj, nome: groupName, username }, units, requestedBy: String(payload.requestedBy || 'Sistema').trim() || 'Sistema' };

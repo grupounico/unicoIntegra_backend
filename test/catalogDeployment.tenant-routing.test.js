@@ -7,12 +7,14 @@ test('configura a rota do Hub correspondente ao ambiente no tenant', () => {
     { baseUrl: 'https://unicocontato.tech/hubunico-staging/' },
     '12',
     { custom: 'preserved', baseUrl: 'https://unicocontato.tech/hubunico' },
+    'https://cliente.example/webhook/order-token',
   ), {
     custom: 'preserved',
     unidadeId: 12,
     inStock: true,
     baseUrl: 'https://unicocontato.tech/hubunico-staging',
     requestPath: '/api/v1/produtos/consultar-eans',
+    orderWebhookUrl: 'https://cliente.example/webhook/order-token',
   });
 });
 
