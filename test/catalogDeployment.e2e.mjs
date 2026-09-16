@@ -64,7 +64,7 @@ const hubServer = await server(56100, async (req, res) => {
     integrationCreated = true;
     return json(res, 201, { integracao: { integrationId: 23 } });
   }
-  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled', integrationId: 23, runId: 'run-1' });
+  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled', integrationId: 23 });
   if (req.method === 'GET' && url.pathname === '/api/v1/integration/catalog-sync') {
     assert.equal(integrationCreated, true);
     integrationPolls += 1;

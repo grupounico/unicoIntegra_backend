@@ -40,10 +40,11 @@ export async function createIntegration(target, apiKey, unit, credentialRef, ide
 
 export async function scheduleRun(target, apiKey, integrationId, unitId, idempotencyKey) {
   try {
+    const current = await getIntegration(target, apiKey, integrationId, unitId);
+    const previousRunId = current.latestRun?.runId ? String(current.latestRun.runId) : null;
     const response = await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/run`, {}, { headers: { 'Idempotency-Key': idempotencyKey } }));
-    const runId = response.data?.runId;
-    if (!runId) throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub não retornou o ID da execução agendada.', { stage: 'scheduling_sync', unitId });
-    return { runId: String(runId), status: String(response.data?.status || 'scheduled') };
+    const runId = response.data?.runId ? String(response.data.runId) : null;
+    return { runId, previousRunId, status: String(response.data?.status || 'scheduled') };
   }
   catch (error) { throw mapUpstreamError(error, 'HUB', 'scheduling_sync', unitId); }
 }
