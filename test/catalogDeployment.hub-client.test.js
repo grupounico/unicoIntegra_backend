@@ -14,6 +14,11 @@ test('persiste o run agendado e ativa exatamente o mesmo snapshot', async (conte
   const server = http.createServer(async (request, response) => {
     assert.equal(request.headers['x-api-key'], 'seller-secret');
     response.setHeader('content-type', 'application/json');
+    if (request.method === 'GET' && request.url === '/api/v1/integration/catalog-sync') {
+      response.writeHead(200);
+      response.end(JSON.stringify({ integracoes: [{ integrationId: 23, latestRun: null }] }));
+      return;
+    }
     if (request.url === '/api/v1/integration/catalog-sync/23/run') {
       response.writeHead(202);
       response.end(JSON.stringify({ status: 'scheduled', integrationId: 23, runId: expectedRunId }));
@@ -32,14 +37,19 @@ test('persiste o run agendado e ativa exatamente o mesmo snapshot', async (conte
   const target = { baseUrl: `http://127.0.0.1:${server.address().port}` };
 
   const scheduled = await scheduleRun(target, 'seller-secret', 23, 'unit-1', 'schedule-key');
-  assert.deepEqual(scheduled, { runId: expectedRunId, status: 'scheduled' });
+  assert.deepEqual(scheduled, { runId: expectedRunId, previousRunId: null, status: 'scheduled' });
   assert.equal(isExpectedRun({ runId: 'previous-run', status: 'published' }, scheduled.runId), false);
   assert.equal(isExpectedRun({ runId: expectedRunId, status: 'shadow' }, scheduled.runId), true);
   await activateSnapshot(target, 'seller-secret', 23, scheduled.runId, 'unit-1', 'activate-key');
 });
 
-test('rejeita agendamento sem runId', async (context) => {
-  const server = http.createServer((_request, response) => {
+test('aceita agendamento sem runId e preserva o ID da execução anterior', async (context) => {
+  const server = http.createServer((request, response) => {
+    if (request.method === 'GET' && request.url === '/api/v1/integration/catalog-sync') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ integracoes: [{ integrationId: 23, latestRun: { runId: 'previous-run', status: 'published' } }] }));
+      return;
+    }
     response.writeHead(202, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ status: 'scheduled', integrationId: 23 }));
   });
@@ -47,8 +57,8 @@ test('rejeita agendamento sem runId', async (context) => {
   context.after(() => server.close());
   const target = { baseUrl: `http://127.0.0.1:${server.address().port}` };
 
-  await assert.rejects(
-    scheduleRun(target, 'seller-secret', 23, 'unit-1', 'schedule-key'),
-    (error) => error.code === 'HUB_INVALID_RESPONSE',
+  assert.deepEqual(
+    await scheduleRun(target, 'seller-secret', 23, 'unit-1', 'schedule-key'),
+    { runId: null, previousRunId: 'previous-run', status: 'scheduled' },
   );
 });

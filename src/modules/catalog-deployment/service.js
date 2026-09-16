@@ -172,7 +172,7 @@ async function provisionHub(deployment, units) {
       let current = await prisma.clientDeploymentUnit.findUnique({ where: { id: unit.id } });
       if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, sourceUnitId: current.sourceUnitId }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
       if (!current.hubIntegrationId) { const stepKey = `${deployment.id}:${unit.id}:integration`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, decryptSecret(current.credentialRefEncrypted), stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, sourceUnitId: current.sourceUnitId, hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } }); }
-      if (current.status === 'integration_created') { const stepKey = `${deployment.id}:${unit.id}:run`; const run = await trackedStep(deployment.id, unit.id, 'hub_schedule_run', () => hub.scheduleRun(targets.hub, apiKey, current.hubIntegrationId, current.id, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId) }, response: (value) => ({ runId: value.runId, status: value.status }) }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status } }); }
+      if (current.status === 'integration_created') { const stepKey = `${deployment.id}:${unit.id}:run`; const run = await trackedStep(deployment.id, unit.id, 'hub_schedule_run', () => hub.scheduleRun(targets.hub, apiKey, current.hubIntegrationId, current.id, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId) }, response: (value) => ({ runId: value.runId, previousRunId: value.previousRunId, status: value.status }) }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status } }); }
     } catch (error) { await failUnit(deployment, unit, error); }
   }
 }
@@ -184,9 +184,18 @@ async function monitorHub(deployment, units) {
   for (const unit of units.filter((item) => ['scheduled', 'running'].includes(item.status))) {
     try {
       const integration = await hub.getIntegration(targets.hub, apiKey, unit.hubIntegrationId, unit.id); const run = integration.latestRun || {};
-      const expectedRunId = unit.latestRunId ? String(unit.latestRunId) : null;
+      let expectedRunId = unit.latestRunId ? String(unit.latestRunId) : null;
       const observedRunId = run.runId ? String(run.runId) : null;
-      if (!expectedRunId) throw new DeploymentError('HUB_RUN_ID_MISSING', 'A execução agendada não possui um identificador para acompanhamento.', { statusCode: 409, stage: 'validating_hub_catalog', unitId: unit.id, action: 'Agende uma nova carga para obter um runId válido.' });
+      if (!expectedRunId) {
+        const scheduledStep = await prisma.clientDeploymentStep.findFirst({ where: { deploymentId: deployment.id, unitId: unit.id, step: 'hub_schedule_run', status: 'completed' }, orderBy: { startedAt: 'desc' }, select: { responseSnapshot: true } });
+        const previousRunId = scheduledStep?.responseSnapshot && typeof scheduledStep.responseSnapshot === 'object' && scheduledStep.responseSnapshot.previousRunId ? String(scheduledStep.responseSnapshot.previousRunId) : null;
+        if (!observedRunId || observedRunId === previousRunId) {
+          waiting = true;
+          await eventIfChanged(deployment.id, 'hub_run_waiting', unit.id, { expectedRunId: null, observedRunId, previousRunId });
+          continue;
+        }
+        expectedRunId = observedRunId;
+      }
       if (!hub.isExpectedRun(run, expectedRunId)) {
         waiting = true;
         await eventIfChanged(deployment.id, 'hub_run_waiting', unit.id, { expectedRunId, observedRunId });
@@ -476,7 +485,8 @@ export async function runUnit(deploymentId, unitId, idempotencyKey) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
   if (!unit.hubIntegrationId || !deployment.sellerApiKeyEncrypted) throw new DeploymentError('HUB_INTEGRATION_NOT_READY', 'A integração do Hub ainda não foi criada.', { statusCode: 409, stage: 'scheduling_sync', unitId });
-  const run = await hub.scheduleRun(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
+  const stepKey = `${deploymentId}:${unitId}:${idempotencyKey}`;
+  const run = await trackedStep(deploymentId, unitId, 'hub_schedule_run', () => hub.scheduleRun(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, unitId, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, hubIntegrationId: String(unit.hubIntegrationId) }, response: (value) => ({ runId: value.runId, previousRunId: value.previousRunId, status: value.status }) });
   await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status, latestValidRows: null, latestRunFinishedAt: null, lastErrorCode: null, lastErrorMessage: null } });
   await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } }); return getDeployment(deploymentId);
 }
