@@ -29,6 +29,8 @@ Object.assign(process.env, {
   DEPLOYMENT_WORKER_INTERVAL_MS: '1000',
   DEPLOYMENT_LEASE_MS: '10000',
   DEPLOYMENT_MONITOR_TIMEOUT_MS: '30000',
+  DEPLOYMENT_HUB_POLL_INTERVAL_MS: '1000',
+  DEPLOYMENT_HUB_DELAY_WARNING_MS: '30000',
   BANCO_UNICO_WORKER_POLL_INTERVAL_MS: '500',
 });
 
@@ -60,23 +62,21 @@ const hubServer = await server(56100, async (req, res) => {
     const payload = await body(req);
     assert.equal(payload.sourceUnitId, 1);
     assert.equal(payload.sellerUnitId, 10);
-    assert.equal(payload.publicationMode, 'shadow');
+    assert.equal(payload.publicationMode, 'automatic');
+    assert.equal(payload.pageSize, 250);
     integrationCreated = true;
     return json(res, 201, { integracao: { integrationId: 23 } });
   }
-  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/run') return json(res, 202, { status: 'scheduled', integrationId: 23 });
-  if (req.method === 'GET' && url.pathname === '/api/v1/integration/catalog-sync') {
+  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/runs') {
+    assert.ok(req.headers['idempotency-key']);
+    return json(res, 202, { status: 'queued', integrationId: 23, runId: '1a92d969-03a7-4b0d-9920-1b9811a98727' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/v1/integration/catalog-sync/23/runs/1a92d969-03a7-4b0d-9920-1b9811a98727') {
     assert.equal(integrationCreated, true);
     integrationPolls += 1;
-    const latestRun = integrationPolls === 1
-      ? { runId: 'previous-run', status: 'published', validRows: 99, finishedAt: new Date().toISOString() }
-      : { runId: 'run-1', status: 'shadow', validRows: 1, finishedAt: new Date().toISOString() };
-    return json(res, 200, [{ integrationId: 23, latestRun }]);
-  }
-  if (req.method === 'POST' && url.pathname === '/api/v1/integration/catalog-sync/23/activate') {
-    const payload = await body(req);
-    assert.equal(payload.runId, 'run-1');
-    return json(res, 200, { status: 'automatic', runId: payload.runId });
+    return json(res, 200, integrationPolls === 1
+      ? { runId: '1a92d969-03a7-4b0d-9920-1b9811a98727', integrationId: 23, status: 'running', processedRows: 1, validRows: 1, publishedRows: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null }
+      : { runId: '1a92d969-03a7-4b0d-9920-1b9811a98727', integrationId: 23, status: 'published', processedRows: 1, validRows: 1, publishedRows: 1, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), error: null });
   }
   if (req.method === 'GET' && url.pathname === '/api/v1/produtos/unidades/10/catalogo') {
     assert.equal(url.searchParams.get('offset'), '0');
@@ -186,9 +186,18 @@ try {
   const created = await api('/api/v1/deployments', { method: 'POST', headers: { 'Idempotency-Key': 'catalog-e2e-1' }, body: JSON.stringify(createPayload) });
   assert.equal(created.status, 202);
   assert.equal(JSON.stringify(created.body).includes('catalog_test'), false);
+  assert.equal(created.body.units[0].hasCredential, true);
   assert.equal(created.body.units[0].hasOrderWebhookUrl, true);
   assert.equal(JSON.stringify(created.body).includes(orderWebhookUrl), false);
   const deploymentId = created.body.id;
+  const unitId = created.body.units[0].id;
+
+  const corrected = await api(`/api/v1/deployments/${deploymentId}/units/${unitId}`, { method: 'PATCH', body: JSON.stringify({ pageSize: 250, requestedBy: 'Teste E2E' }) });
+  assert.equal(corrected.status, 200);
+  assert.equal(corrected.body.units[0].pageSize, 250);
+  assert.equal(corrected.body.units[0].hasCredential, true);
+  assert.equal(JSON.stringify(corrected.body).includes('catalog_test'), false);
+  assert.ok(corrected.body.events.some((item) => item.eventType === 'unit_configuration_updated'));
 
   const duplicate = await api('/api/v1/deployments', { method: 'POST', headers: { 'Idempotency-Key': 'catalog-e2e-1' }, body: JSON.stringify(createPayload) });
   assert.equal(duplicate.status, 202);

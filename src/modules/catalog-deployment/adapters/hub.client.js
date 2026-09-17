@@ -38,15 +38,44 @@ export async function createIntegration(target, apiKey, unit, credentialRef, ide
   } catch (error) { throw mapUpstreamError(error, 'HUB', 'creating_integrations', unit.id); }
 }
 
+export async function updateIntegration(target, apiKey, integrationId, changes, unitId) {
+  try {
+    const response = await withRetry(() => sellerClient(target, apiKey).patch(`/api/v1/integration/catalog-sync/${integrationId}`, changes));
+    const updatedId = response.data?.integracao?.integrationId ?? response.data?.integrationId;
+    if (updatedId !== undefined && Number(updatedId) !== Number(integrationId)) {
+      throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub confirmou outra integração ao atualizar a origem.', { stage: 'updating_integration', unitId });
+    }
+    return response.data?.integracao || response.data;
+  } catch (error) { throw mapUpstreamError(error, 'HUB', 'updating_integration', unitId); }
+}
+
 export async function scheduleRun(target, apiKey, integrationId, unitId, idempotencyKey) {
   try {
-    const current = await getIntegration(target, apiKey, integrationId, unitId);
-    const previousRunId = current.latestRun?.runId ? String(current.latestRun.runId) : null;
-    const response = await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/run`, {}, { headers: { 'Idempotency-Key': idempotencyKey } }));
+    const response = await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/runs`, {}, { headers: { 'Idempotency-Key': idempotencyKey } }));
     const runId = response.data?.runId ? String(response.data.runId) : null;
-    return { runId, previousRunId, status: String(response.data?.status || 'scheduled') };
+    if (!runId) throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub não retornou o identificador da carga.', { stage: 'scheduling_sync', unitId });
+    return { runId, status: String(response.data?.status || 'queued').toLowerCase() };
   }
   catch (error) { throw mapUpstreamError(error, 'HUB', 'scheduling_sync', unitId); }
+}
+
+export async function getRun(target, apiKey, integrationId, runId, unitId) {
+  try {
+    const response = await withRetry(() => sellerClient(target, apiKey).get(`/api/v1/integration/catalog-sync/${integrationId}/runs/${encodeURIComponent(runId)}`));
+    const run = response.data;
+    if (!run?.runId || String(run.runId) !== String(runId) || Number(run.integrationId) !== Number(integrationId)) {
+      throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub retornou dados de outra execução.', { stage: 'validating_hub_catalog', unitId });
+    }
+    return run;
+  } catch (error) {
+    if (error.response?.status === 404) {
+      throw new DeploymentError('HUB_RUN_NOT_FOUND', 'A execução ainda não foi localizada no Hub.', {
+        statusCode: 404, stage: 'validating_hub_catalog', unitId, retryable: true, httpStatus: 404,
+        action: 'O serviço continuará consultando o mesmo run antes de solicitar intervenção.',
+      });
+    }
+    throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId);
+  }
 }
 
 export async function getIntegration(target, apiKey, integrationId, unitId) {

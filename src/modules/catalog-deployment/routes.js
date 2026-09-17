@@ -7,6 +7,7 @@ router.get('/', controller.list);
 router.get('/:deploymentId', controller.get);
 router.get('/:deploymentId/events', controller.events);
 router.get('/:deploymentId/stream', controller.stream);
+router.patch('/:deploymentId/units/:unitId', controller.updateUnit);
 router.post('/:deploymentId/start', controller.start);
 router.post('/:deploymentId/retry', controller.retry);
 router.post('/:deploymentId/units/:unitId/retry', controller.retryUnit);

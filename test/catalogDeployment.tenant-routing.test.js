@@ -22,6 +22,8 @@ test('retry com tenant existente volta para reconciliacao do Unicommerce', () =>
   assert.equal(resumableUnitStatus({ hubIntegrationId: 2, unicommerceTenantId: 'tenant-1' }), 'catalog_active');
   assert.equal(resumableUnitStatus({ hubIntegrationId: 2, unicommerceTenantId: 'tenant-1', bancoUnicoImportJobId: 'job-1' }), 'catalog_active');
   assert.equal(resumableUnitStatus({ hubIntegrationId: 2 }), 'scheduled');
+  assert.equal(resumableUnitStatus({ hubIntegrationId: 2, latestRunStatus: 'failed' }), 'integration_created');
+  assert.equal(resumableUnitStatus({ hubIntegrationId: 2, latestRunStatus: 'published', latestPublishedRows: 10 }), 'catalog_active');
   assert.equal(resumableUnitStatus({ hubSellerUnitId: 10 }), 'hub_unit_created');
   assert.equal(resumableUnitStatus({}), 'pending');
 });
