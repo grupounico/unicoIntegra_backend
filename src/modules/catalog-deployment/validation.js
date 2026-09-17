@@ -58,6 +58,59 @@ function httpsUrl(value, field) {
   return parsed.toString();
 }
 
+function postgresUrl(value, field) {
+  let parsed;
+  try {
+    parsed = new URL(requiredString(value, field, 2048));
+  } catch (error) {
+    if (error instanceof DeploymentError) throw error;
+    throw new DeploymentError('INVALID_CREDENTIAL_REF', `${field} deve ser uma conexão PostgreSQL válida.`, { statusCode: 400, stage: 'validation' });
+  }
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol) || !parsed.hostname || !parsed.username || !parsed.pathname.slice(1)) {
+    throw new DeploymentError('INVALID_CREDENTIAL_REF', `${field} deve ser uma conexão PostgreSQL completa.`, { statusCode: 400, stage: 'validation' });
+  }
+  return parsed.toString();
+}
+
+export function validateUnitUpdatePayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new DeploymentError('INVALID_INPUT', 'Informe os dados que deseja corrigir.', { statusCode: 400, stage: 'validation' });
+  }
+  const allowed = new Set(['codigo', 'nome', 'cnpj', 'sourceUnitId', 'credentialRef', 'orderWebhookUrl', 'pageSize', 'validEanDropThresholdBps', 'requestedBy']);
+  const unknown = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unknown.length) {
+    throw new DeploymentError('INVALID_INPUT', `Campos não permitidos: ${unknown.join(', ')}.`, { statusCode: 400, stage: 'validation' });
+  }
+
+  const value = {};
+  if (payload.codigo !== undefined) value.code = requiredString(payload.codigo, 'codigo', 100);
+  if (payload.nome !== undefined) value.name = requiredString(payload.nome, 'nome', 255);
+  if (payload.cnpj !== undefined) {
+    const cnpj = digits(payload.cnpj);
+    if (!isValidCnpj(cnpj)) throw new DeploymentError('INVALID_CNPJ', 'O CNPJ da unidade é inválido.', { statusCode: 400, stage: 'validation' });
+    value.cnpj = cnpj;
+  }
+  if (payload.sourceUnitId !== undefined) {
+    const sourceUnitId = Number(payload.sourceUnitId);
+    if (!Number.isInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', 'sourceUnitId deve ser um número inteiro positivo.', { statusCode: 400, stage: 'validation' });
+    value.sourceUnitId = sourceUnitId;
+  }
+  if (payload.credentialRef !== undefined) value.credentialRef = postgresUrl(payload.credentialRef, 'credentialRef');
+  if (payload.orderWebhookUrl !== undefined) value.orderWebhookUrl = httpsUrl(payload.orderWebhookUrl, 'orderWebhookUrl');
+  if (payload.pageSize !== undefined) {
+    const pageSize = Number(payload.pageSize);
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500) throw new DeploymentError('INVALID_PAGE_SIZE', 'pageSize deve estar entre 1 e 500.', { statusCode: 400, stage: 'validation' });
+    value.pageSize = pageSize;
+  }
+  if (payload.validEanDropThresholdBps !== undefined) {
+    const threshold = Number(payload.validEanDropThresholdBps);
+    if (!Number.isInteger(threshold) || threshold < 0 || threshold > 10000) throw new DeploymentError('INVALID_EAN_THRESHOLD', 'validEanDropThresholdBps deve estar entre 0 e 10000.', { statusCode: 400, stage: 'validation' });
+    value.validEanDropThresholdBps = threshold;
+  }
+  if (!Object.keys(value).length) throw new DeploymentError('INVALID_INPUT', 'Informe ao menos um campo para corrigir.', { statusCode: 400, stage: 'validation' });
+  return value;
+}
+
 export function validateCreatePayload(payload) {
   const group = payload?.group || {};
   const groupCnpj = digits(group.cnpj);
@@ -79,9 +132,7 @@ export function validateCreatePayload(payload) {
     if (!Number.isInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', `sourceUnitId da unidade ${code} deve ser positivo.`, { statusCode: 400, stage: 'validation' });
     if (sources.has(sourceUnitId)) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', `sourceUnitId ${sourceUnitId} está duplicado.`, { statusCode: 400, stage: 'validation' });
     sources.add(sourceUnitId);
-    let credentialRef;
-    try { credentialRef = new URL(requiredString(unit.credentialRef, `units[${index}].credentialRef`, 2048)); } catch { throw new DeploymentError('INVALID_CREDENTIAL_REF', `A conexão da unidade ${code} é inválida.`, { statusCode: 400, stage: 'validation' }); }
-    if (!['postgres:', 'postgresql:'].includes(credentialRef.protocol) || !credentialRef.hostname || !credentialRef.username || !credentialRef.pathname.slice(1)) throw new DeploymentError('INVALID_CREDENTIAL_REF', `A conexão PostgreSQL da unidade ${code} está incompleta.`, { statusCode: 400, stage: 'validation' });
+    const credentialRef = postgresUrl(unit.credentialRef, `units[${index}].credentialRef`);
     const pageSize = unit.pageSize === undefined ? 500 : Number(unit.pageSize);
     const threshold = unit.validEanDropThresholdBps === undefined ? 1000 : Number(unit.validEanDropThresholdBps);
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500) throw new DeploymentError('INVALID_PAGE_SIZE', 'pageSize deve estar entre 1 e 500.', { statusCode: 400, stage: 'validation' });
@@ -89,7 +140,7 @@ export function validateCreatePayload(payload) {
     const provider = unit.provider || 'alpha7';
     if (provider !== 'alpha7') throw new DeploymentError('UNSUPPORTED_PROVIDER', 'A primeira versão suporta apenas alpha7.', { statusCode: 400, stage: 'validation' });
     return { code, name: requiredString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
-      credentialRef: credentialRef.toString(), provider, publicationMode: 'shadow', pageSize,
+      credentialRef, provider, publicationMode: 'automatic', pageSize,
       validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true,
       orderWebhookUrl: httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) };
   });

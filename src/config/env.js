@@ -103,6 +103,12 @@ export const env = {
   DEPLOYMENT_MONITOR_TIMEOUT_MS: Number(
     readEnv('DEPLOYMENT_MONITOR_TIMEOUT_MS', '1800000'),
   ),
+  DEPLOYMENT_HUB_POLL_INTERVAL_MS: Number(
+    readEnv('DEPLOYMENT_HUB_POLL_INTERVAL_MS', '30000'),
+  ),
+  DEPLOYMENT_HUB_DELAY_WARNING_MS: Number(
+    readEnv('DEPLOYMENT_HUB_DELAY_WARNING_MS', '3600000'),
+  ),
   CORS_ALLOWED_ORIGINS: readEnv(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:5173,http://localhost:3000,https://unico-integra.vercel.app',

@@ -14,6 +14,8 @@ export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig =
 export function resumableUnitStatus(unit) {
   if (unit.hubIntegrationId) {
     if (unit.unicommerceTenantId) return 'catalog_active';
+    if (unit.latestRunStatus === 'published' && Number(unit.latestPublishedRows ?? unit.latestValidRows ?? 0) > 0) return 'catalog_active';
+    if (['failed', 'rejected', 'error', 'cancelled'].includes(String(unit.latestRunStatus || '').toLowerCase())) return 'integration_created';
     return 'scheduled';
   }
   return unit.hubSellerUnitId ? 'hub_unit_created' : 'pending';

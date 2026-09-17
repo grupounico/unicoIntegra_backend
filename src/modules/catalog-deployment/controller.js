@@ -9,6 +9,7 @@ function handler(operation, success = 200) { return async (req, res) => { try { 
 export const create = handler((req) => service.createDeployment(req.body || {}, key(req), correlation(req)), 202);
 export const list = handler((req) => service.listDeployments(req.query || {}));
 export const get = handler((req) => service.getDeployment(req.params.deploymentId));
+export const updateUnit = handler((req) => service.updateDeploymentUnit(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const start = handler((req) => service.startDeployment(req.params.deploymentId, actor(req)), 202);
 export const retry = handler((req) => service.retryDeployment(req.params.deploymentId, actor(req)), 202);
 export const retryUnit = handler((req) => service.retryUnit(req.params.deploymentId, req.params.unitId, actor(req)), 202);

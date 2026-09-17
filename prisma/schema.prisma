@@ -291,7 +291,7 @@ model ClientDeploymentUnit {
   sourceUnitId             Int
   credentialRefEncrypted   String
   orderWebhookUrlEncrypted String?
-  publicationMode          String                  @default("shadow") @db.VarChar(20)
+  publicationMode          String                  @default("automatic") @db.VarChar(20)
   pageSize                 Int                     @default(500)
   validEanDropThresholdBps Int                     @default(1000)
   status                   String                  @default("pending") @db.VarChar(60)
@@ -299,8 +299,16 @@ model ClientDeploymentUnit {
   hubIntegrationId         BigInt?
   latestRunId              String?                 @db.VarChar(255)
   latestRunStatus          String?                 @db.VarChar(50)
+  latestProcessedRows      Int?
   latestValidRows          Int?
+  latestPublishedRows      Int?
+  latestRunScheduledAt     DateTime?               @db.Timestamp(6)
+  latestRunStartedAt       DateTime?               @db.Timestamp(6)
   latestRunFinishedAt      DateTime?               @db.Timestamp(6)
+  latestRunPolledAt        DateTime?               @db.Timestamp(6)
+  nextRunPollAt            DateTime?               @db.Timestamp(6)
+  runNotFoundCount         Int                     @default(0)
+  monitoringDelayedAt      DateTime?               @db.Timestamp(6)
   unicommerceTenantId      String?                 @db.VarChar(255)
   clientId                 Int?
   bancoUnicoImportJobId    Int?
@@ -321,6 +329,7 @@ model ClientDeploymentUnit {
   @@unique([deploymentId, provider, sourceUnitId])
   @@unique([hubSellerUnitId])
   @@index([deploymentId, status])
+  @@index([status, nextRunPollAt])
   @@index([bancoUnicoImportJobId])
   @@index([storefrontStatus])
   @@map("client_deployment_units")
