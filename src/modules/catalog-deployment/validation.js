@@ -1,7 +1,20 @@
 import crypto from 'node:crypto';
 import { DeploymentError } from './errors.js';
 
-export const ASSET_TYPES = ['banner_1', 'banner_2', 'banner_3', 'logo_desktop', 'logo_mobile'];
+export const ASSET_TYPES = [
+  'banner_1', 'banner_2', 'banner_3',
+  'banner_mobile_1', 'banner_mobile_2', 'banner_mobile_3',
+  'logo_desktop', 'logo_mobile',
+];
+export const ASSET_DIMENSIONS = Object.freeze({
+  banner_1: [2000, 444], banner_2: [2000, 444], banner_3: [2000, 444],
+  banner_mobile_1: [2000, 800], banner_mobile_2: [2000, 800], banner_mobile_3: [2000, 800],
+});
+
+export function meetsCoverageGate(value, threshold = 95) {
+  const percentage = Number(value);
+  return Number.isFinite(percentage) && percentage >= threshold;
+}
 
 export function digits(value) { return String(value || '').replace(/\D/g, ''); }
 

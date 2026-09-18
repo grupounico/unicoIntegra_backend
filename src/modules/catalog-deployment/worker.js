@@ -2,7 +2,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { prisma } from '../../../prisma/PrismaClient.js';
 import { env } from '../../config/env.js';
-import { processDeployment } from './service.js';
+import { processDeployment, processHubCatalogBackground, purgeExpiredDeploymentCredentials, reconcileStorefrontAliases } from './service.js';
 
 const workerId = `${os.hostname()}:${process.pid}:${crypto.randomUUID()}`;
 let timer = null; let running = false;
@@ -11,8 +11,18 @@ async function tick() {
   if (running) return; running = true;
   try {
     const staleBefore = new Date(Date.now() - env.DEPLOYMENT_LEASE_MS);
-    const candidate = await prisma.clientDeployment.findFirst({ where: { status: { in: ['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico'] }, OR: [{ workerHeartbeatAt: null }, { workerHeartbeatAt: { lt: staleBefore } }] }, orderBy: { updatedAt: 'asc' } });
-    if (!candidate) return;
+    const releasePollBefore = new Date(Date.now() - Math.max(5000, env.STOREFRONT_RELEASE_POLL_INTERVAL_MS));
+    const candidate = await prisma.clientDeployment.findFirst({ where: { AND: [
+      { status: { in: ['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico', 'awaiting_activation', 'waiting_storefront_release'] } },
+      { OR: [{ status: { not: 'waiting_storefront_release' } }, { status: 'waiting_storefront_release', updatedAt: { lt: releasePollBefore } }] },
+      { OR: [{ workerHeartbeatAt: null }, { workerHeartbeatAt: { lt: staleBefore } }] },
+    ] }, orderBy: { updatedAt: 'asc' } });
+    if (!candidate) {
+      await processHubCatalogBackground();
+      await purgeExpiredDeploymentCredentials();
+      await reconcileStorefrontAliases();
+      return;
+    }
     const claimed = await prisma.clientDeployment.updateMany({ where: { id: candidate.id, OR: [{ workerHeartbeatAt: null }, { workerHeartbeatAt: { lt: staleBefore } }] }, data: { workerId, workerHeartbeatAt: new Date(), startedAt: candidate.startedAt || new Date() } });
     if (claimed.count) {
       const heartbeat = setInterval(() => {
@@ -25,6 +35,9 @@ async function tick() {
         await prisma.clientDeployment.updateMany({ where: { id: candidate.id, workerId }, data: { workerId: null, workerHeartbeatAt: null } });
       }
     }
+    await processHubCatalogBackground();
+    await purgeExpiredDeploymentCredentials();
+    await reconcileStorefrontAliases();
   } catch (error) { console.error('[catalog-deployment-worker]', error.message); }
   finally { running = false; }
 }

@@ -5,13 +5,14 @@ import { createClient, listClients } from '../../services/clients.service.js';
 import { createBancoUnicoImportJob, getBancoUnicoImportJob, retryBancoUnicoImportJob } from '../../services/bancoUnicoImports.service.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError, publicError } from './errors.js';
-import { ASSET_TYPES, canonicalHash, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
+import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
 import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from './tenant-routing.js';
 import { buildStorefrontDomain } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 import * as vercel from './adapters/vercel.client.js';
+import * as banco from './adapters/banco-unico.client.js';
 
 const streams = new EventEmitter(); streams.setMaxListeners(500);
 const ACTIVE_JOBS = new Set(['pending', 'claimed', 'processing', 'cancelling', 'paused']);
@@ -258,7 +259,7 @@ export async function startDeployment(id, actor) {
   const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { assets: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
   const missing = deployment.assets.filter((asset) => asset.status !== 'confirmed');
-  if (missing.length) throw new DeploymentError('ASSET_MISSING', `Confirme os assets: ${missing.map((item) => item.type).join(', ')}.`, { statusCode: 409, stage: 'assets', action: 'Envie e confirme os cinco arquivos antes de iniciar.' });
+  if (missing.length) throw new DeploymentError('ASSET_MISSING', `Confirme os assets: ${missing.map((item) => item.type).join(', ')}.`, { statusCode: 409, stage: 'assets', action: 'Envie e confirme os oito assets responsivos antes de iniciar.' });
   if (!['draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required'].includes(deployment.status)) return getDeployment(id);
   await prisma.clientDeployment.update({ where: { id }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   await event(id, 'deployment_queued', { fromStatus: deployment.status, toStatus: 'queued', createdBy: actor });
@@ -404,17 +405,17 @@ async function provisionCommerce(deployment, units, assets) {
       const confirmed = await trackedStep(deployment.id, unit.id, 'unicommerce_validate_tenant', () => commerce.getTenant(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId) }, response: (value) => ({ tenantId: String(value.id), status: value.status, hasCredential: value.hasErpCredentials === true }) });
       if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.erpConfig?.baseUrl !== requiredErpConfig.baseUrl || confirmed.erpConfig?.requestPath !== requiredErpConfig.requestPath || confirmed.erpConfig?.orderWebhookUrl !== requiredErpConfig.orderWebhookUrl || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding) } });
-      await trackedStep(deployment.id, unit.id, 'unicommerce_validate_catalog', () => commerce.validateTenantCatalog(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'unicommerce_ready' } });
     } catch (error) { await failUnit(deployment, unit, error); }
   }
 }
 
 function parsePostgresUrl(raw) { const url = new URL(raw); return { host: url.hostname, port: Number(url.port) || 5432, database: decodeURIComponent(url.pathname.slice(1)), user: decodeURIComponent(url.username), password: decodeURIComponent(url.password) }; }
-async function importBancoUnico(deployment, units) {
+async function importBancoUnicoLegacy(deployment, units) {
   const targets = catalogTargets(deployment.environment);
   let waiting = false;
-  for (const unit of units.filter((item) => ['unicommerce_ready', 'banco_unico_importing'].includes(item.status))) {
+  for (const unit of units.filter((item) => ['unicommerce_ready', 'banco_unico_importing'].includes(item.status)
+    && (item.clientId || item.catalogSourceType === 'alpha7_direct'))) {
     try {
       let current = await prisma.clientDeploymentUnit.findUnique({ where: { id: unit.id } });
       if (!current.clientId) {
@@ -424,7 +425,7 @@ async function importBancoUnico(deployment, units) {
         const existingClient = existingClients.data.find((item) => item.name === clientName);
         const client = existingClient || await trackedStep(deployment.id, unit.id, 'banco_unico_create_client', () => createClient({ name: clientName, businessUnit: current.name, cnpj: current.cnpj, clientInstance: current.slug, provider: 'alpha7', instance: db.host, alpha7Port: db.port, alpha7Database: db.database, alpha7User: db.user, credential: db.password, username: deployment.requestedBy }), { request: { name: clientName, provider: 'alpha7', cnpj: current.cnpj, hasCredential: true }, response: (value) => ({ clientId: value.id }) });
         if (existingClient) await event(deployment.id, 'banco_unico_client_reconciled', { unitId: unit.id, metadata: { clientId: existingClient.id } });
-        current = await prisma.clientDeploymentUnit.update({ where: { id: current.id }, data: { clientId: client.id } });
+        current = await prisma.clientDeploymentUnit.update({ where: { id: current.id }, data: { clientId: client.id, catalogSourceType: 'alpha7_direct' } });
       }
       if (!current.bancoUnicoImportJobId) {
         const activeJob = await prisma.bancoUnicoImportJob.findFirst({ where: { clientId: current.clientId, status: { in: [...ACTIVE_JOBS] } }, orderBy: { createdAt: 'desc' } });
@@ -458,6 +459,125 @@ async function importBancoUnico(deployment, units) {
   return waiting;
 }
 
+function validHubEans(products) {
+  return [...new Set(products.map((product) => String(product.ean || '').replace(/\D/g, ''))
+    .filter((ean) => ean.length >= 8 && ean.length <= 14))];
+}
+
+async function processHubCatalogUnit(deployment, unit) {
+  const targets = catalogTargets(deployment.environment);
+  const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted);
+  const clientKey = unit.slug;
+  let current = unit;
+  let job = current.bancoUnicoImportJobId
+    ? await prisma.bancoUnicoImportJob.findUnique({ where: { id: current.bancoUnicoImportJobId } }) : null;
+
+  if (!job) {
+    const products = await trackedStep(deployment.id, unit.id, 'hub_read_catalog_for_coverage',
+      () => hub.listCatalog(targets.hub, apiKey, unit.hubSellerUnitId, unit.id), {
+        request: { hubSellerUnitId: String(unit.hubSellerUnitId), runId: unit.latestRunId },
+        response: (value) => ({ totalProducts: value.length }),
+      });
+    const eans = validHubEans(products);
+    if (!eans.length) throw new DeploymentError('HUB_EMPTY_CATALOG', 'O catálogo publicado no Hub não possui EANs válidos.', {
+      statusCode: 422, stage: 'measuring_catalog_coverage', unitId: unit.id,
+    });
+    const coverage = await trackedStep(deployment.id, unit.id, 'banco_unico_register_coverage',
+      () => banco.registerCoverage(targets.bancoUnico, clientKey, `${deployment.groupName} - ${unit.name}`, eans, {
+        deploymentId: deployment.id, unitId: unit.id, runId: unit.latestRunId, sourceType: 'hub_catalog',
+      }, unit.id), {
+        request: { clientKey, sourceType: 'hub_catalog', totalEans: eans.length, runId: unit.latestRunId },
+        response: (value) => ({ coveragePercentage: value.snapshot?.coveragePercentage, coveredProducts: value.snapshot?.coveredProducts, missingProducts: value.snapshot?.missingProducts }),
+      });
+    const snapshot = coverage.snapshot || {};
+    job = await prisma.bancoUnicoImportJob.create({ data: {
+      clientName: `${deployment.groupName} - ${unit.name}`,
+      sourceType: 'hub_catalog', sourceLabel: `hub:${unit.hubSellerUnitId}:${unit.latestRunId}`,
+      status: Number(snapshot.missingProducts || 0) > 0 ? 'external_processing' : 'completed',
+      mode: 'publish', requestedBy: deployment.requestedBy, currentStage: 'coverage',
+      currentMessage: 'Cobertura calculada a partir do catálogo publicado pelo Hub.',
+      progressCurrent: Number(snapshot.coveredProducts || 0), progressTotal: eans.length,
+      progressPercent: Number(snapshot.coveragePercentage || 0), totalCatalogValid: eans.length,
+      totalSelected: Number(snapshot.missingProducts || 0), totalExisting: Number(snapshot.coveredProducts || 0),
+      totalPublished: 0, totalErrors: 0,
+      options: { managedExternally: true, deploymentId: deployment.id, unitId: unit.id, clientKey, runId: unit.latestRunId },
+      ...(Number(snapshot.missingProducts || 0) === 0 ? { finishedAt: new Date() } : {}),
+    } });
+    current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+      bancoUnicoImportJobId: job.id, catalogSourceType: 'hub_catalog',
+      coverageTotal: eans.length, coverageProcessed: eans.length,
+      coverageCovered: Number(snapshot.coveredProducts || 0), coveragePublished: 0, coverageErrors: 0,
+      coveragePercent: Number(snapshot.coveragePercentage || 0), status: 'banco_unico_importing',
+    } });
+  }
+
+  if (job.status === 'external_processing') {
+    const missing = await banco.getMissingEans(targets.bancoUnico, clientKey, unit.id, 100);
+    const eans = missing.eans || [];
+    let published = 0;
+    let errors = 0;
+    if (eans.length) {
+      const products = await hub.getCatalogByEans(targets.hub, apiKey, unit.hubSellerUnitId, eans, unit.id);
+      errors = Math.max(0, eans.length - products.length);
+      const result = await banco.publishMissingProducts(targets.bancoUnico, products, unit.id);
+      published = Number(result.processed || result.upserted || products.length);
+    }
+    const refreshed = await banco.refreshCoverage(targets.bancoUnico, clientKey, unit.id);
+    const snapshot = refreshed.snapshot || {};
+    const remaining = Number(snapshot.missingProducts || 0);
+    const status = remaining === 0 ? 'completed' : 'external_processing';
+    job = await prisma.bancoUnicoImportJob.update({ where: { id: job.id }, data: {
+      status, currentStage: remaining === 0 ? 'completed' : 'enriching_missing',
+      currentMessage: remaining === 0 ? 'Cobertura concluída.' : `Enriquecendo ${remaining} EANs ausentes em background.`,
+      progressCurrent: Number(snapshot.coveredProducts || 0), progressTotal: Number(snapshot.validUniqueCount || current.coverageTotal || 0),
+      progressPercent: Number(snapshot.coveragePercentage || 0), totalExisting: Number(snapshot.coveredProducts || 0),
+      totalPublished: { increment: published }, totalErrors: { increment: errors },
+      ...(remaining === 0 ? { finishedAt: new Date() } : {}),
+    } });
+    current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+      coverageProcessed: Number(current.coverageTotal || snapshot.validUniqueCount || 0),
+      coverageCovered: Number(snapshot.coveredProducts || 0), coveragePublished: Number(job.totalPublished || 0),
+      coverageErrors: Number(job.totalErrors || 0), coveragePercent: Number(snapshot.coveragePercentage || 0),
+    } });
+  }
+
+  const percentage = Number(current.coveragePercent || job.progressPercent || 0);
+  if (meetsCoverageGate(percentage) && !['awaiting_activation', 'active'].includes(current.status)) {
+    await trackedStep(deployment.id, unit.id, 'unicommerce_validate_sellable_catalog',
+      () => commerce.validateTenantCatalog(targets.unicommerce, unit.unicommerceTenantId, unit.id), {
+        request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, minimumSellableProducts: 20 },
+        response: (value) => value,
+      });
+    await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'awaiting_activation' } });
+    await event(deployment.id, 'catalog_coverage_gate_passed', { unitId: unit.id, metadata: { sourceType: 'hub_catalog', coveragePercentage: percentage, threshold: 95, jobId: job.id } });
+  }
+  return { waitingForGate: percentage < 95, backgroundPending: job.status === 'external_processing' };
+}
+
+async function importBancoUnico(deployment, units) {
+  const legacyWaiting = await importBancoUnicoLegacy(deployment, units);
+  let hubWaiting = false;
+  for (const unit of units.filter((item) => ['unicommerce_ready', 'banco_unico_importing'].includes(item.status)
+    && !item.clientId && item.catalogSourceType !== 'alpha7_direct')) {
+    try {
+      const result = await processHubCatalogUnit(deployment, unit);
+      hubWaiting ||= result.waitingForGate;
+    } catch (error) { await failUnit(deployment, unit, error); }
+  }
+  return legacyWaiting || hubWaiting;
+}
+
+export async function processHubCatalogBackground() {
+  const job = await prisma.bancoUnicoImportJob.findFirst({ where: { sourceType: 'hub_catalog', status: 'external_processing' }, orderBy: { updatedAt: 'asc' } });
+  if (!job) return false;
+  const unit = await prisma.clientDeploymentUnit.findFirst({ where: { bancoUnicoImportJobId: job.id } });
+  if (!unit) return false;
+  const deployment = await prisma.clientDeployment.findUnique({ where: { id: unit.deploymentId } });
+  if (!deployment) return false;
+  await processHubCatalogUnit(deployment, unit);
+  return true;
+}
+
 export async function processDeployment(id) {
   let deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
   if (!deployment || ['draft', 'cancelled', 'completed'].includes(deployment.status)) return;
@@ -474,9 +594,16 @@ export async function processDeployment(id) {
     const units = await prisma.clientDeploymentUnit.findMany({ where: { deploymentId: id } }); const failed = units.filter((unit) => ['failed', 'reconciliation_required'].includes(unit.status));
     const status = failed.length ? (failed.length === units.length ? 'failed' : 'partially_failed') : units.every((unit) => unit.status === 'awaiting_activation') ? 'awaiting_activation' : 'queued';
     await prisma.clientDeployment.update({ where: { id }, data: { status, currentStage: status, workerId: null, workerHeartbeatAt: null } });
+    if (status === 'awaiting_activation') {
+      await activateTenants(id, 'Sistema (ativação automática)', `auto:${id}`);
+    }
   } catch (error) {
-    const exposed = publicError(error, { deploymentId: id }); await prisma.clientDeployment.update({ where: { id }, data: { status: exposed.code === 'RECONCILIATION_REQUIRED' ? 'reconciliation_required' : 'failed', currentStage: exposed.stage, lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable, workerId: null } });
-    await event(id, 'deployment_failed', { toStatus: 'failed', metadata: exposed });
+    const exposed = publicError(error, { deploymentId: id });
+    const activated = await prisma.clientDeploymentUnit.count({ where: { deploymentId: id, status: { in: ['active', 'reconciliation_required'] } } });
+    const failureStatus = activated ? 'reconciliation_required'
+      : exposed.code === 'STOREFRONT_RELEASE_NOT_READY' ? 'waiting_storefront_release' : 'failed';
+    await prisma.clientDeployment.update({ where: { id }, data: { status: failureStatus, currentStage: exposed.stage, lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable, workerId: null } });
+    await event(id, 'deployment_failed', { toStatus: failureStatus, metadata: exposed });
   }
 }
 
@@ -498,15 +625,19 @@ export async function retryUnit(deploymentId, unitId, actor) {
 
 async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
   const target = catalogTargets(deployment.environment).storefront;
-  if (!target.enabled) return { enabled: false, domains: [] };
+  if (!target.enabled) throw new DeploymentError('STOREFRONT_PROVISIONING_DISABLED', 'A automação do storefront está desativada.', {
+    statusCode: 503, stage: 'configuration', retryable: true,
+    action: 'Ative STOREFRONT_PROVISIONING_ENABLED para liberar a implantação.',
+  });
   let firstError = null;
   const domains = [];
   for (const unit of deployment.units) {
+    let activated = unit.status === 'active';
     try {
-      if (unit.status !== 'active' || !unit.unicommerceTenantId) {
-        throw new DeploymentError('STOREFRONT_NOT_READY', 'O tenant precisa estar ativo antes da publicação do storefront.', {
+      if (!['awaiting_activation', 'active'].includes(unit.status) || !unit.unicommerceTenantId) {
+        throw new DeploymentError('STOREFRONT_NOT_READY', 'O tenant precisa estar pronto e inativo antes da publicação do storefront.', {
           statusCode: 409, stage: 'provisioning_storefront', unitId: unit.id,
-          action: 'Conclua a ativação do tenant e tente novamente.',
+          action: 'Conclua os gates de catálogo e tente novamente.',
         });
       }
       const domain = buildStorefrontDomain({
@@ -530,27 +661,28 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
       }
       await prisma.clientDeploymentUnit.update({
         where: { id: unit.id },
-        data: { storefrontDomain: domain, storefrontStatus: 'configuring_tenant' },
+        data: { storefrontDomain: domain, storefrontStatus: 'validating_release' },
       });
-      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_storefront_domain',
-        () => commerce.configureStorefrontDomain(
-          catalogTargets(deployment.environment).unicommerce,
-          unit.unicommerceTenantId,
-          domain,
-          unit.id,
-        ), {
-          idempotencyKey: `${deployment.id}:${unit.id}:storefront-tenant:${idempotencyKey}`,
-          request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, domain },
-          response: (tenant) => ({ tenantId: String(tenant.id), domain: tenant.storefrontDomain, status: tenant.status }),
+      const release = await trackedStep(deployment.id, unit.id, 'vercel_validate_main_release',
+        () => vercel.validatedMainDeployment(target.vercel, unit.id), {
+          request: { environment: deployment.environment, projectId: target.vercel.projectId, owner: target.vercel.githubOwner, repo: target.vercel.githubRepo, branch: target.vercel.githubBranch },
+          response: (value) => ({ projectId: target.vercel.projectId, deploymentId: value.deployment.uid, branch: value.githubBranch, commitSha: value.githubCommitSha, readyState: value.deployment.readyState || value.deployment.state }),
         });
+      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+        storefrontStatus: 'configuring_tenant', vercelProjectId: target.vercel.projectId,
+        vercelDeploymentId: release.deployment.uid, vercelGitBranch: release.githubBranch,
+        vercelGitCommitSha: release.githubCommitSha, storefrontReleaseVerifiedAt: release.verifiedAt,
+      } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'assigning_alias' } });
       const aliasResult = await trackedStep(deployment.id, unit.id, 'vercel_assign_storefront_alias',
-        () => vercel.ensureProjectAlias(target.vercel, domain, unit.id), {
+        () => vercel.ensureProjectAlias(target.vercel, domain, unit.id, release.githubCommitSha), {
           idempotencyKey: `${deployment.id}:${unit.id}:vercel-alias:${idempotencyKey}`,
           request: { environment: deployment.environment, projectId: target.vercel.projectId, domain },
           response: (value) => ({
             projectId: target.vercel.projectId,
             deploymentId: value.deployment.uid,
+            branch: value.githubBranch,
+            commitSha: value.githubCommitSha,
             domain: value.alias.alias || domain,
           }),
         });
@@ -560,9 +692,34 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
           storefrontStatus: 'validating',
           vercelProjectId: target.vercel.projectId,
           vercelDeploymentId: aliasResult.deployment.uid,
+          vercelGitBranch: aliasResult.githubBranch,
+          vercelGitCommitSha: aliasResult.githubCommitSha,
+          storefrontReleaseVerifiedAt: aliasResult.verifiedAt,
           domainVerifiedAt: new Date(),
         },
       });
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_storefront_domain',
+        () => commerce.configureStorefrontDomain(
+          catalogTargets(deployment.environment).unicommerce,
+          unit.unicommerceTenantId,
+          domain,
+          unit.id,
+          activated ? 'active' : 'inactive',
+        ), {
+          idempotencyKey: `${deployment.id}:${unit.id}:storefront-tenant:${idempotencyKey}`,
+          request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, domain },
+          response: (tenant) => ({ tenantId: String(tenant.id), domain: tenant.storefrontDomain, status: tenant.status }),
+        });
+      if (!activated) {
+        const stepKey = `${deployment.id}:${unit.id}:auto-activation`;
+        await trackedStep(deployment.id, unit.id, 'unicommerce_activate_tenant',
+          () => commerce.activateTenant(catalogTargets(deployment.environment).unicommerce, unit.unicommerceTenantId, stepKey, unit.id), {
+            idempotencyKey: stepKey, request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId },
+          });
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'active' } });
+        activated = true;
+        await event(deployment.id, 'unit_activated', { unitId: unit.id, fromStatus: unit.status, toStatus: 'active', createdBy: actor });
+      }
       await trackedStep(deployment.id, unit.id, 'storefront_validate_identity',
         () => vercel.validateStorefrontIdentity(target, domain, unit.unicommerceTenantId, unit.id), {
           request: { environment: deployment.environment, domain, tenantId: unit.unicommerceTenantId },
@@ -587,7 +744,11 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
       const exposed = publicError(error, { deploymentId: deployment.id, unitId: unit.id });
       await prisma.clientDeploymentUnit.update({
         where: { id: unit.id },
-        data: { storefrontStatus: 'failed', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable },
+        data: {
+          status: activated ? 'reconciliation_required' : unit.status,
+          storefrontStatus: activated ? 'reconciliation_required' : 'failed',
+          lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable,
+        },
       });
       await event(deployment.id, 'storefront_failed', {
         unitId: unit.id, toStatus: 'failed', createdBy: actor, metadata: exposed,
@@ -606,18 +767,28 @@ export async function activateTenants(id, actor, idempotencyKey) {
   if (!deployment.units.every((unit) => ['awaiting_activation', 'active'].includes(unit.status)) || !deployment.assets.every((asset) => asset.status === 'confirmed')) throw new DeploymentError('ACTIVATION_NOT_READY', 'A implantação ainda não cumpre todos os critérios de ativação.', { statusCode: 409, stage: 'activating_tenants' });
   const targets = catalogTargets(deployment.environment);
   const snapshot = { approvedAt: new Date().toISOString(), approvedBy: actor, units: deployment.units.map((unit) => ({ id: unit.id, tenantId: unit.unicommerceTenantId, hubSellerUnitId: String(unit.hubSellerUnitId), bancoUnicoImportJobId: unit.bancoUnicoImportJobId, storefrontDomain: targets.storefront.enabled ? buildStorefrontDomain({ username: deployment.username, unit, prefix: targets.storefront.domainPrefix, suffix: targets.storefront.domainSuffix }) : null })) };
-  for (const unit of deployment.units.filter((item) => item.status !== 'active')) { const stepKey = `${id}:${unit.id}:${idempotencyKey}`; await trackedStep(id, unit.id, 'unicommerce_activate_tenant', () => commerce.activateTenant(targets.unicommerce, unit.unicommerceTenantId, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId } }); await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'active' } }); await event(id, 'unit_activated', { unitId: unit.id, fromStatus: unit.status, toStatus: 'active', createdBy: actor }); }
-  const activatedDeployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
   try {
-    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: targets.storefront.enabled ? 'provisioning_storefront' : 'activating_tenants', activationSnapshot: snapshot, activatedAt: new Date(), activatedBy: actor } });
-    const storefront = await provisionStorefrontUnits(activatedDeployment, actor, idempotencyKey);
+    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: 'provisioning_storefront', activationSnapshot: snapshot } });
+    const storefront = await provisionStorefrontUnits(deployment, actor, idempotencyKey);
     const completedSnapshot = { ...snapshot, storefront: storefront.domains };
-    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: completedSnapshot, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
+    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: completedSnapshot, activatedAt: new Date(), activatedBy: actor, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
+    if (deployment.environment === 'staging') {
+      const credentialExpiresAt = new Date(Date.now() + Math.max(1, env.CATALOG_CREDENTIAL_RETENTION_DAYS) * 86400000);
+      await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: id }, data: { credentialExpiresAt } });
+    } else {
+      await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: id }, data: { credentialRefEncrypted: null, credentialExpiresAt: null } });
+      if (deployment.promotedFromDeploymentId) {
+        await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: deployment.promotedFromDeploymentId }, data: { credentialRefEncrypted: null, credentialExpiresAt: null } });
+      }
+    }
     await event(id, 'tenants_activated', { toStatus: 'completed', metadata: completedSnapshot, createdBy: actor });
     return getDeployment(id);
   } catch (error) {
     const exposed = publicError(error, { deploymentId: id });
-    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
+    const hasActivatedUnit = await prisma.clientDeploymentUnit.count({ where: { deploymentId: id, status: { in: ['active', 'reconciliation_required'] } } });
+    const status = hasActivatedUnit ? 'reconciliation_required'
+      : exposed.code === 'STOREFRONT_RELEASE_NOT_READY' ? 'waiting_storefront_release' : 'awaiting_activation';
+    await prisma.clientDeployment.update({ where: { id }, data: { status, currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
     throw error;
   }
 }
@@ -645,6 +816,88 @@ export async function provisionStorefronts(id, actor, idempotencyKey) {
     await prisma.clientDeployment.update({ where: { id }, data: { currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
     throw error;
   }
+}
+
+export async function promoteToProduction(id, actor, idempotencyKey) {
+  if (!idempotencyKey) throw new DeploymentError('IDEMPOTENCY_KEY_REQUIRED', 'O header Idempotency-Key é obrigatório.', { statusCode: 400 });
+  const existing = await prisma.clientDeployment.findUnique({ where: { idempotencyKey }, include: includeAll() });
+  if (existing) {
+    if (existing.promotedFromDeploymentId !== id || existing.environment !== 'production') {
+      throw new DeploymentError('IDEMPOTENCY_CONFLICT', 'A chave de idempotência já foi usada por outra promoção.', { statusCode: 409, stage: 'promotion' });
+    }
+    return formatDeployment(existing);
+  }
+  if (!env.CATALOG_PRODUCTION_PROMOTION_ENABLED) throw new DeploymentError('PRODUCTION_PROMOTION_DISABLED', 'A promoção para production está bloqueada por configuração.', {
+    statusCode: 409, stage: 'promotion', action: 'Ative CATALOG_PRODUCTION_PROMOTION_ENABLED quando desejar liberar production.',
+  });
+  const source = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
+  if (!source || source.environment !== 'staging' || source.status !== 'completed') throw new DeploymentError('PROMOTION_NOT_READY', 'Somente uma implantação staging concluída pode ser promovida.', { statusCode: 409, stage: 'promotion' });
+  if (source.assets.length !== ASSET_TYPES.length || source.assets.some((asset) => asset.status !== 'confirmed')) throw new DeploymentError('PROMOTION_BRANDING_INCOMPLETE', 'O staging não possui o branding V2 completo.', { statusCode: 409, stage: 'promotion' });
+  if (source.units.some((unit) => !unit.credentialRefEncrypted || (unit.credentialExpiresAt && unit.credentialExpiresAt <= new Date()))) {
+    throw new DeploymentError('PROMOTION_CREDENTIAL_EXPIRED', 'A credencial ERP retida para promoção expirou.', { statusCode: 409, stage: 'promotion' });
+  }
+  const release = await vercel.validatedMainDeployment(catalogTargets('staging').storefront.vercel, source.units[0]?.id);
+  if (source.units.some((unit) => unit.vercelGitCommitSha !== release.githubCommitSha)) {
+    throw new DeploymentError('STOREFRONT_RELEASE_CHANGED', 'A main mudou desde a validação do staging.', { statusCode: 409, stage: 'promotion', retryable: true });
+  }
+  const promoted = await prisma.clientDeployment.create({ data: {
+    idempotencyKey, payloadHash: canonicalHash({ promotedFromDeploymentId: id, environment: 'production', sha: release.githubCommitSha }),
+    promotedFromDeploymentId: id, groupCnpj: source.groupCnpj, groupName: source.groupName,
+    username: source.username, environment: 'production', status: 'queued', currentStage: 'queued',
+    requestedBy: actor, correlationId: source.correlationId, inputSnapshot: source.inputSnapshot, startedAt: new Date(),
+    units: { create: source.units.map((unit) => ({
+      code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug, isInitial: unit.isInitial,
+      provider: unit.provider, sourceUnitId: unit.sourceUnitId, credentialRefEncrypted: unit.credentialRefEncrypted,
+      orderWebhookUrlEncrypted: unit.orderWebhookUrlEncrypted, publicationMode: 'automatic', pageSize: unit.pageSize,
+      validEanDropThresholdBps: unit.validEanDropThresholdBps, credentialExpiresAt: unit.credentialExpiresAt,
+    })) },
+    assets: { create: source.assets.map((asset) => ({
+      type: asset.type, uploadId: asset.uploadId, objectKey: asset.objectKey, publicUrl: asset.publicUrl,
+      mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksumSha256: asset.checksumSha256,
+      width: asset.width, height: asset.height, status: 'confirmed',
+    })) },
+  }, include: includeAll() });
+  await event(promoted.id, 'deployment_promoted', { toStatus: 'queued', createdBy: actor, metadata: { sourceDeploymentId: id, stagingCommitSha: release.githubCommitSha } });
+  return formatDeployment(promoted);
+}
+
+export async function purgeExpiredDeploymentCredentials() {
+  return prisma.clientDeploymentUnit.updateMany({
+    where: { credentialExpiresAt: { lt: new Date() }, credentialRefEncrypted: { not: null } },
+    data: { credentialRefEncrypted: null, credentialExpiresAt: null },
+  });
+}
+
+export async function reconcileStorefrontAliases() {
+  const staleBefore = new Date(Date.now() - Math.max(60000, env.STOREFRONT_RECONCILE_INTERVAL_MS));
+  const units = await prisma.clientDeploymentUnit.findMany({
+    where: { storefrontStatus: 'ready', storefrontDomain: { not: null }, OR: [
+      { storefrontReleaseVerifiedAt: null }, { storefrontReleaseVerifiedAt: { lt: staleBefore } },
+    ] },
+    orderBy: { storefrontReleaseVerifiedAt: 'asc' }, take: 20,
+  });
+  for (const unit of units) {
+    const deployment = await prisma.clientDeployment.findUnique({ where: { id: unit.deploymentId } });
+    if (!deployment || deployment.status !== 'completed') continue;
+    const target = catalogTargets(deployment.environment).storefront;
+    if (!target.enabled) continue;
+    const release = await vercel.validatedMainDeployment(target.vercel, unit.id);
+    if (unit.vercelGitCommitSha === release.githubCommitSha && unit.vercelDeploymentId === release.deployment.uid) {
+      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontReleaseVerifiedAt: release.verifiedAt } });
+      continue;
+    }
+    const reconciled = await vercel.ensureProjectAlias(target.vercel, unit.storefrontDomain, unit.id, release.githubCommitSha);
+    await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+      vercelProjectId: target.vercel.projectId, vercelDeploymentId: reconciled.deployment.uid,
+      vercelGitBranch: reconciled.githubBranch, vercelGitCommitSha: reconciled.githubCommitSha,
+      storefrontReleaseVerifiedAt: reconciled.verifiedAt, domainVerifiedAt: new Date(),
+    } });
+    await event(deployment.id, 'storefront_alias_reconciled', { unitId: unit.id, metadata: {
+      projectId: target.vercel.projectId, deploymentId: reconciled.deployment.uid,
+      branch: reconciled.githubBranch, commitSha: reconciled.githubCommitSha, domain: unit.storefrontDomain,
+    } });
+  }
+  return units.length;
 }
 
 export async function runUnit(deploymentId, unitId, idempotencyKey) {
@@ -679,6 +932,28 @@ export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {
 
 export async function cancelDeployment(id, actor) { const current = await prisma.clientDeployment.findUnique({ where: { id } }); if (!current) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 }); if (current.status === 'completed') throw new DeploymentError('DEPLOYMENT_ALREADY_ACTIVE', 'Uma implantação concluída não pode ser cancelada.', { statusCode: 409 }); await prisma.clientDeployment.update({ where: { id }, data: { status: 'cancelled', currentStage: 'cancelled', finishedAt: new Date(), workerId: null } }); await event(id, 'deployment_cancelled', { fromStatus: current.status, toStatus: 'cancelled', createdBy: actor }); return getDeployment(id); }
 export async function presignDeploymentAssets(id, assets) { const deployment = await prisma.clientDeployment.findUnique({ where: { id }, select: { environment: true } }); if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 }); const target = catalogTargets(deployment.environment).unicommerce; const result = await trackedStep(id, null, 'assets_presign', () => commerce.presignAssets(target, id, assets), { request: { environment: deployment.environment, assets: assets.map(({ type, mimeType, sizeBytes }) => ({ type, mimeType, sizeBytes })) }, response: (value) => ({ assetTypes: (value.assets || []).map((item) => item.type) }) }); for (const item of result.assets || []) if (ASSET_TYPES.includes(item.type)) await prisma.clientDeploymentAsset.update({ where: { deploymentId_type: { deploymentId: id, type: item.type } }, data: { uploadId: item.uploadId, objectKey: item.objectKey, status: 'uploading' } }); return result; }
-export async function confirmDeploymentAsset(id, payload) { if (!ASSET_TYPES.includes(payload.type)) throw new DeploymentError('ASSET_TYPE_INVALID', 'Tipo de asset inválido.', { statusCode: 400, stage: 'assets' }); const deployment = await prisma.clientDeployment.findUnique({ where: { id }, select: { environment: true } }); if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 }); const result = await trackedStep(id, null, 'asset_confirm', () => commerce.confirmAsset(catalogTargets(deployment.environment).unicommerce, { deploymentId: id, ...payload }), { request: { environment: deployment.environment, type: payload.type, uploadId: payload.uploadId, hasChecksum: Boolean(payload.checksumSha256) }, response: (value) => ({ type: payload.type, mimeType: value.mimeType, sizeBytes: value.sizeBytes, width: value.width, height: value.height }) }); await prisma.clientDeploymentAsset.update({ where: { deploymentId_type: { deploymentId: id, type: payload.type } }, data: { uploadId: result.uploadId || payload.uploadId, objectKey: result.objectKey, publicUrl: result.publicUrl, mimeType: result.mimeType, sizeBytes: result.sizeBytes, checksumSha256: result.checksumSha256, width: result.width, height: result.height, status: 'confirmed' } }); await event(id, 'asset_confirmed', { metadata: { type: payload.type, mimeType: result.mimeType, sizeBytes: result.sizeBytes, width: result.width, height: result.height } }); return getDeployment(id); }
+export async function confirmDeploymentAsset(id, payload) {
+  if (!ASSET_TYPES.includes(payload.type)) throw new DeploymentError('ASSET_TYPE_INVALID', 'Tipo de asset inválido.', { statusCode: 400, stage: 'assets' });
+  const deployment = await prisma.clientDeployment.findUnique({ where: { id }, select: { environment: true } });
+  if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
+  const result = await trackedStep(id, null, 'asset_confirm', async () => {
+    const confirmed = await commerce.confirmAsset(catalogTargets(deployment.environment).unicommerce, { deploymentId: id, ...payload });
+    const expected = ASSET_DIMENSIONS[payload.type];
+    if (expected && (Number(confirmed.width) !== expected[0] || Number(confirmed.height) !== expected[1])) {
+      throw new DeploymentError('ASSET_DIMENSIONS_INVALID', `${payload.type} deve ter ${expected[0]}×${expected[1]} pixels.`, { statusCode: 422, stage: 'assets' });
+    }
+    return confirmed;
+  }, {
+    request: { environment: deployment.environment, type: payload.type, uploadId: payload.uploadId, hasChecksum: Boolean(payload.checksumSha256) },
+    response: (value) => ({ type: payload.type, mimeType: value.mimeType, sizeBytes: value.sizeBytes, width: value.width, height: value.height }),
+  });
+  await prisma.clientDeploymentAsset.update({ where: { deploymentId_type: { deploymentId: id, type: payload.type } }, data: {
+    uploadId: result.uploadId || payload.uploadId, objectKey: result.objectKey, publicUrl: result.publicUrl,
+    mimeType: result.mimeType, sizeBytes: result.sizeBytes, checksumSha256: result.checksumSha256,
+    width: result.width, height: result.height, status: 'confirmed',
+  } });
+  await event(id, 'asset_confirmed', { metadata: { type: payload.type, mimeType: result.mimeType, sizeBytes: result.sizeBytes, width: result.width, height: result.height } });
+  return getDeployment(id);
+}
 export function subscribe(id, res) { res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache, no-transform'); res.setHeader('Connection', 'keep-alive'); res.setHeader('X-Accel-Buffering', 'no'); res.flushHeaders?.(); const send = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); const listener = (data) => send('deployment', data); streams.on(String(id), listener); send('connected', { type: 'connected', deploymentId: id, at: new Date().toISOString() }); const heartbeat = setInterval(() => send('heartbeat', { deploymentId: id, at: new Date().toISOString() }), 15000); heartbeat.unref?.(); reqCleanup(res, () => { clearInterval(heartbeat); streams.off(String(id), listener); }); }
 function reqCleanup(res, callback) { res.on('close', callback); }

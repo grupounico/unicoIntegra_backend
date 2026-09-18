@@ -43,9 +43,13 @@ export function catalogTargets(environment) {
       domainSuffix: env.STOREFRONT_DOMAIN_SUFFIX,
       healthTimeoutMs: env.STOREFRONT_HEALTH_TIMEOUT_MS,
       vercel: {
-        apiToken: production ? env.VERCEL_PRODUCTION_API_TOKEN || env.VERCEL_API_TOKEN : env.VERCEL_STAGING_API_TOKEN || env.VERCEL_API_TOKEN,
-        teamId: production ? env.VERCEL_PRODUCTION_TEAM_ID || env.VERCEL_TEAM_ID : env.VERCEL_STAGING_TEAM_ID || env.VERCEL_TEAM_ID,
-        projectId: production ? env.VERCEL_PRODUCTION_PROJECT_ID || env.VERCEL_PROJECT_ID : env.VERCEL_STAGING_PROJECT_ID || env.VERCEL_PROJECT_ID,
+        apiToken: production ? env.VERCEL_PRODUCTION_API_TOKEN || env.VERCEL_API_TOKEN : env.VERCEL_STAGING_API_TOKEN,
+        teamId: production ? env.VERCEL_PRODUCTION_TEAM_ID || env.VERCEL_TEAM_ID : env.VERCEL_STAGING_TEAM_ID,
+        projectId: production ? env.VERCEL_PRODUCTION_PROJECT_ID || env.VERCEL_PROJECT_ID : env.VERCEL_STAGING_PROJECT_ID,
+        githubOwner: env.STOREFRONT_GITHUB_OWNER,
+        githubRepo: env.STOREFRONT_GITHUB_REPO,
+        githubBranch: env.STOREFRONT_GITHUB_BRANCH,
+        githubToken: env.STOREFRONT_GITHUB_TOKEN,
       },
     },
   };

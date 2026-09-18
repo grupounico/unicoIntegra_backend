@@ -37,10 +37,12 @@ Depois de mudar a flag, reinicie o processo com `--update-env`. Confira o campo
 
 ## Storefront compartilhado na Vercel
 
-A fase 2 reutiliza um único projeto Vercel. Nenhum projeto ou build é criado por
-cliente. Depois da ativação do tenant, o orquestrador associa um alias ao último
-deployment de produção pronto e valida `/api/storefront/identity` antes de
-concluir.
+Cada ambiente usa seu projeto Vercel compartilhado. Nenhum projeto ou build é
+criado por cliente. O orquestrador aceita somente um deployment `READY` ligado
+a `grupounico/unicommerce:main` cujo `githubCommitSha` seja igual ao SHA atual
+do GitHub. O alias é reservado, o domínio é configurado no tenant ainda inativo
+e só então o tenant é ativado. Identidade, branding responsivo e catálogo
+público são validados antes de concluir.
 
 ```env
 STOREFRONT_PROVISIONING_ENABLED=true
@@ -50,6 +52,10 @@ STOREFRONT_HEALTH_TIMEOUT_MS=60000
 VERCEL_API_TOKEN=
 VERCEL_TEAM_ID=
 VERCEL_PROJECT_ID=
+STOREFRONT_GITHUB_OWNER=grupounico
+STOREFRONT_GITHUB_REPO=unicommerce
+STOREFRONT_GITHUB_BRANCH=main
+STOREFRONT_GITHUB_TOKEN=
 ```
 
 A unidade inicial usa `whatsapp-<username>.vercel.app`. Filiais usam também o
@@ -58,9 +64,16 @@ código da unidade, por exemplo `whatsapp-<username>-loja-02.vercel.app`.
 `VERCEL_PROJECT_ID` podem ser compartilhados entre staging e production; para
 separá-los, use as variantes `VERCEL_STAGING_*` e `VERCEL_PRODUCTION_*`.
 
-`POST /api/v1/deployments/:deploymentId/provision-storefronts` permite retomar
-somente essa fase em uma implantação cujos tenants já estão ativos. O comando
-exige `Idempotency-Key`.
+Se a release ainda não estiver alinhada, a implantação permanece em
+`waiting_storefront_release` com o tenant inativo. O reconciliador apenas move
+aliases concluídos quando uma nova release validada da `main` fica pronta; ele
+não cria deploys, commits, merges ou pushes.
+
+`POST /api/v1/deployments/:deploymentId/promote` promove staging para production
+de forma idempotente. A rota fica bloqueada até
+`CATALOG_PRODUCTION_PROMOTION_ENABLED=true`, exige que o SHA validado em staging
+continue sendo a `main` atual e retém a credencial ERP cifrada por no máximo
+`CATALOG_CREDENTIAL_RETENTION_DAYS` (padrão: 7).
 
 ## Webhook de pedidos por unidade
 
@@ -87,9 +100,8 @@ está configurada.
 
 ## Monitoramento exato do run no Hub
 
-O agendamento `POST /api/v1/integration/catalog-sync/:integrationId/run` deve
+O agendamento `POST /api/v1/integration/catalog-sync/:integrationId/runs` deve
 retornar `runId`. O Único Integra persiste esse valor antes de iniciar o
-monitoramento. Nas consultas a `GET /api/v1/integration/catalog-sync`, o
-`latestRun` só é processado quando seu `runId` coincide com o valor persistido;
-uma execução anterior é ignorada. A ativação do shadow envia o mesmo `runId` no
-corpo para impedir a publicação de outro snapshot.
+monitoramento. A consulta usa
+`GET /api/v1/integration/catalog-sync/:integrationId/runs/:runId` e só aceita o
+run exato persistido. Uma execução anterior nunca é usada para liberar o gate.
