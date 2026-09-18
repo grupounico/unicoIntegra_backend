@@ -238,36 +238,37 @@ model BancoUnicoImportEvent {
 }
 
 model ClientDeployment {
-  id                    String                  @id @default(uuid()) @db.Uuid
-  idempotencyKey        String                  @unique @db.VarChar(255)
-  payloadHash           String                  @db.VarChar(64)
-  groupCnpj             String                  @db.VarChar(14)
-  groupName             String                  @db.VarChar(255)
-  username              String                  @db.VarChar(50)
-  environment           String                  @default("production") @db.VarChar(20)
-  status                String                  @default("draft") @db.VarChar(50)
-  currentStage          String?                 @db.VarChar(100)
-  requestedBy           String                  @db.VarChar(255)
-  correlationId         String?                 @db.VarChar(255)
-  hubSellerId           BigInt?
-  sellerApiKeyEncrypted String?
-  inputSnapshot         Json
-  activationSnapshot    Json?
-  lastErrorCode         String?                 @db.VarChar(100)
-  lastErrorMessage      String?
-  retryable             Boolean                 @default(false)
-  workerId              String?                 @db.VarChar(255)
-  workerHeartbeatAt     DateTime?               @db.Timestamp(6)
-  startedAt             DateTime?               @db.Timestamp(6)
-  finishedAt            DateTime?               @db.Timestamp(6)
-  activatedAt           DateTime?               @db.Timestamp(6)
-  activatedBy           String?                 @db.VarChar(255)
-  createdAt             DateTime                @default(now()) @db.Timestamp(6)
-  updatedAt             DateTime                @updatedAt @db.Timestamp(6)
-  units                 ClientDeploymentUnit[]
-  assets                ClientDeploymentAsset[]
-  steps                 ClientDeploymentStep[]
-  events                ClientDeploymentEvent[]
+  id                       String                  @id @default(uuid()) @db.Uuid
+  idempotencyKey           String                  @unique @db.VarChar(255)
+  payloadHash              String                  @db.VarChar(64)
+  groupCnpj                String                  @db.VarChar(14)
+  groupName                String                  @db.VarChar(255)
+  username                 String                  @db.VarChar(50)
+  environment              String                  @default("production") @db.VarChar(20)
+  promotedFromDeploymentId String?                 @db.Uuid
+  status                   String                  @default("draft") @db.VarChar(50)
+  currentStage             String?                 @db.VarChar(100)
+  requestedBy              String                  @db.VarChar(255)
+  correlationId            String?                 @db.VarChar(255)
+  hubSellerId              BigInt?
+  sellerApiKeyEncrypted    String?
+  inputSnapshot            Json
+  activationSnapshot       Json?
+  lastErrorCode            String?                 @db.VarChar(100)
+  lastErrorMessage         String?
+  retryable                Boolean                 @default(false)
+  workerId                 String?                 @db.VarChar(255)
+  workerHeartbeatAt        DateTime?               @db.Timestamp(6)
+  startedAt                DateTime?               @db.Timestamp(6)
+  finishedAt               DateTime?               @db.Timestamp(6)
+  activatedAt              DateTime?               @db.Timestamp(6)
+  activatedBy              String?                 @db.VarChar(255)
+  createdAt                DateTime                @default(now()) @db.Timestamp(6)
+  updatedAt                DateTime                @updatedAt @db.Timestamp(6)
+  units                    ClientDeploymentUnit[]
+  assets                   ClientDeploymentAsset[]
+  steps                    ClientDeploymentStep[]
+  events                   ClientDeploymentEvent[]
 
   @@index([status, workerHeartbeatAt])
   @@index([environment, status])
@@ -279,51 +280,62 @@ model ClientDeployment {
 }
 
 model ClientDeploymentUnit {
-  id                       String                  @id @default(uuid()) @db.Uuid
-  deploymentId             String                  @db.Uuid
-  deployment               ClientDeployment        @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
-  code                     String                  @db.VarChar(100)
-  name                     String                  @db.VarChar(255)
-  cnpj                     String                  @db.VarChar(14)
-  slug                     String                  @db.VarChar(100)
-  isInitial                Boolean                 @default(false)
-  provider                 String                  @default("alpha7") @db.VarChar(30)
-  sourceUnitId             Int
-  credentialRefEncrypted   String
-  orderWebhookUrlEncrypted String?
-  publicationMode          String                  @default("automatic") @db.VarChar(20)
-  pageSize                 Int                     @default(500)
-  validEanDropThresholdBps Int                     @default(1000)
-  status                   String                  @default("pending") @db.VarChar(60)
-  hubSellerUnitId          BigInt?
-  hubIntegrationId         BigInt?
-  latestRunId              String?                 @db.VarChar(255)
-  latestRunStatus          String?                 @db.VarChar(50)
-  latestProcessedRows      Int?
-  latestValidRows          Int?
-  latestPublishedRows      Int?
-  latestRunScheduledAt     DateTime?               @db.Timestamp(6)
-  latestRunStartedAt       DateTime?               @db.Timestamp(6)
-  latestRunFinishedAt      DateTime?               @db.Timestamp(6)
-  latestRunPolledAt        DateTime?               @db.Timestamp(6)
-  nextRunPollAt            DateTime?               @db.Timestamp(6)
-  runNotFoundCount         Int                     @default(0)
-  monitoringDelayedAt      DateTime?               @db.Timestamp(6)
-  unicommerceTenantId      String?                 @db.VarChar(255)
-  clientId                 Int?
-  bancoUnicoImportJobId    Int?
-  storefrontDomain         String?                 @unique @db.VarChar(253)
-  storefrontStatus         String?                 @db.VarChar(40)
-  vercelProjectId          String?                 @db.VarChar(255)
-  vercelDeploymentId       String?                 @db.VarChar(255)
-  domainVerifiedAt         DateTime?               @db.Timestamp(6)
-  storefrontValidatedAt    DateTime?               @db.Timestamp(6)
-  lastErrorCode            String?                 @db.VarChar(100)
-  lastErrorMessage         String?
-  retryable                Boolean                 @default(false)
-  createdAt                DateTime                @default(now()) @db.Timestamp(6)
-  updatedAt                DateTime                @updatedAt @db.Timestamp(6)
-  events                   ClientDeploymentEvent[]
+  id                          String                  @id @default(uuid()) @db.Uuid
+  deploymentId                String                  @db.Uuid
+  deployment                  ClientDeployment        @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  code                        String                  @db.VarChar(100)
+  name                        String                  @db.VarChar(255)
+  cnpj                        String                  @db.VarChar(14)
+  slug                        String                  @db.VarChar(100)
+  isInitial                   Boolean                 @default(false)
+  provider                    String                  @default("alpha7") @db.VarChar(30)
+  sourceUnitId                Int
+  credentialRefEncrypted      String?
+  credentialExpiresAt         DateTime?               @db.Timestamp(6)
+  orderWebhookUrlEncrypted    String?
+  publicationMode             String                  @default("automatic") @db.VarChar(20)
+  pageSize                    Int                     @default(500)
+  validEanDropThresholdBps    Int                     @default(1000)
+  status                      String                  @default("pending") @db.VarChar(60)
+  hubSellerUnitId             BigInt?
+  hubIntegrationId            BigInt?
+  latestRunId                 String?                 @db.VarChar(255)
+  latestRunStatus             String?                 @db.VarChar(50)
+  latestProcessedRows         Int?
+  latestValidRows             Int?
+  latestPublishedRows         Int?
+  latestRunScheduledAt        DateTime?               @db.Timestamp(6)
+  latestRunStartedAt          DateTime?               @db.Timestamp(6)
+  latestRunFinishedAt         DateTime?               @db.Timestamp(6)
+  latestRunPolledAt           DateTime?               @db.Timestamp(6)
+  nextRunPollAt               DateTime?               @db.Timestamp(6)
+  runNotFoundCount            Int                     @default(0)
+  monitoringDelayedAt         DateTime?               @db.Timestamp(6)
+  unicommerceTenantId         String?                 @db.VarChar(255)
+  clientId                    Int?
+  bancoUnicoImportJobId       Int?
+  catalogSourceType           String?                 @db.VarChar(30)
+  coverageTotal               Int?
+  coverageProcessed           Int?
+  coverageCovered             Int?
+  coveragePublished           Int?
+  coverageErrors              Int?
+  coveragePercent             Float?
+  storefrontDomain            String?                 @unique @db.VarChar(253)
+  storefrontStatus            String?                 @db.VarChar(40)
+  vercelProjectId             String?                 @db.VarChar(255)
+  vercelDeploymentId          String?                 @db.VarChar(255)
+  vercelGitBranch             String?                 @db.VarChar(255)
+  vercelGitCommitSha          String?                 @db.VarChar(64)
+  storefrontReleaseVerifiedAt DateTime?               @db.Timestamp(6)
+  domainVerifiedAt            DateTime?               @db.Timestamp(6)
+  storefrontValidatedAt       DateTime?               @db.Timestamp(6)
+  lastErrorCode               String?                 @db.VarChar(100)
+  lastErrorMessage            String?
+  retryable                   Boolean                 @default(false)
+  createdAt                   DateTime                @default(now()) @db.Timestamp(6)
+  updatedAt                   DateTime                @updatedAt @db.Timestamp(6)
+  events                      ClientDeploymentEvent[]
 
   @@unique([deploymentId, code])
   @@unique([deploymentId, provider, sourceUnitId])

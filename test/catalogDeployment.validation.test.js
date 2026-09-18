@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canonicalHash, isValidCnpj, slugify, validateCreatePayload, validateUnitUpdatePayload } from '../src/modules/catalog-deployment/validation.js';
+import { canonicalHash, isValidCnpj, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from '../src/modules/catalog-deployment/validation.js';
 
 const payload = () => ({ group: { cnpj: '11.222.333/0001-81', nome: 'Rede Saúde', username: 'rede-saude' }, units: [{ codigo: 'CENTRO', nome: 'Farmácia Centro', cnpj: '11.222.333/0001-81', sourceUnitId: 1, credentialRef: 'postgresql://user:pass@db.example:5432/client', orderWebhookUrl: 'https://cliente.example/webhook/order-token' }] });
 
 test('valida CNPJ com dígitos verificadores', () => { assert.equal(isValidCnpj('11.222.333/0001-81'), true); assert.equal(isValidCnpj('11.222.333/0001-82'), false); assert.equal(isValidCnpj('00.000.000/0000-00'), false); });
 test('normaliza slug de grupo e unidade', () => assert.equal(slugify(' Rede Saúde -- CENTRO '), 'rede-saude-centro'));
+test('preserva o slug explícito do tenant', () => { const value = payload(); value.units[0].slug = 'whatsapp-complexopharma'; assert.equal(validateCreatePayload(value).units[0].slug, 'whatsapp-complexopharma'); });
+test('gate de cobertura rejeita 94,99% e aceita 95%', () => { assert.equal(meetsCoverageGate(94.99), false); assert.equal(meetsCoverageGate(95), true); });
 test('aplica defaults e escolhe a primeira unidade', () => { const value = validateCreatePayload(payload()); assert.equal(value.units[0].initial, true); assert.equal(value.units[0].publicationMode, 'automatic'); assert.equal(value.units[0].pageSize, 500); assert.equal(value.units[0].validEanDropThresholdBps, 1000); });
 test('aceita a arroba do setup e persiste somente o username', () => { const value = payload(); value.group.username = '@rede-saude'; assert.equal(validateCreatePayload(value).group.username, 'rede-saude'); });
 test('rejeita provider ainda não suportado', () => { const value = payload(); value.units[0].provider = 'trier'; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'UNSUPPORTED_PROVIDER'); });

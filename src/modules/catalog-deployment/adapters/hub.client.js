@@ -103,3 +103,36 @@ export async function validateCatalog(target, apiKey, sellerUnitId, unitId) {
     if (!Array.isArray(products) || products.length === 0) throw new DeploymentError('HUB_EMPTY_CATALOG', 'O Hub não retornou itens para a unidade.', { statusCode: 422, stage: 'validating_hub_catalog', unitId, action: 'Revise a carga e o vínculo da unidade.' });
   } catch (error) { if (error instanceof DeploymentError) throw error; throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId); }
 }
+
+export async function listCatalog(target, apiKey, sellerUnitId, unitId) {
+  const products = [];
+  let offset = 0;
+  try {
+    while (true) {
+      const response = await withRetry(() => sellerClient(target, apiKey).get(
+        `/api/v1/produtos/unidades/${sellerUnitId}/catalogo`, { params: { offset, limit: 1000 } },
+      ));
+      const page = response.data?.produtos || [];
+      if (!Array.isArray(page)) throw new Error('Invalid catalog page');
+      products.push(...page);
+      const pagination = response.data?.pagination || {};
+      if (!pagination.hasNext) break;
+      offset = Number(pagination.nextOffset);
+      if (!Number.isInteger(offset) || offset <= 0) throw new Error('Invalid catalog cursor');
+    }
+    return products;
+  } catch (error) {
+    throw mapUpstreamError(error, 'HUB', 'reading_hub_catalog', unitId);
+  }
+}
+
+export async function getCatalogByEans(target, apiKey, sellerUnitId, eans, unitId) {
+  try {
+    const response = await withRetry(() => sellerClient(target, apiKey).post('/api/v1/produtos/consultar-eans', {
+      unidadeId: Number(sellerUnitId), eans, inStock: false,
+    }));
+    return response.data?.produtos || [];
+  } catch (error) {
+    throw mapUpstreamError(error, 'HUB', 'reading_hub_catalog', unitId);
+  }
+}
