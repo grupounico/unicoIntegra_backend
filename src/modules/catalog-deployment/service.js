@@ -8,7 +8,7 @@ import { DeploymentError, publicError } from './errors.js';
 import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
 import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
-import { buildStorefrontDomain } from './storefront.js';
+import { buildStorefrontDomain, selectStorefrontDomain } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 import * as vercel from './adapters/vercel.client.js';
@@ -640,7 +640,12 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
           action: 'Conclua os gates de catálogo e tente novamente.',
         });
       }
-      const domain = buildStorefrontDomain({
+      const tenant = unit.storefrontDomain
+        ? null
+        : await commerce.getTenant(catalogTargets(deployment.environment).unicommerce, unit.unicommerceTenantId, unit.id);
+      const domain = selectStorefrontDomain({
+        persistedDomain: unit.storefrontDomain,
+        tenantDomain: tenant?.storefrontDomain,
         username: deployment.username,
         unit,
         prefix: target.domainPrefix,
