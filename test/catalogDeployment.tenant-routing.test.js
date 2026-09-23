@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from '../src/modules/catalog-deployment/tenant-routing.js';
+import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from '../src/modules/catalog-deployment/tenant-routing.js';
 
 test('configura a rota do Hub correspondente ao ambiente no tenant', () => {
   assert.deepEqual(buildTenantErpConfig(
@@ -16,6 +16,28 @@ test('configura a rota do Hub correspondente ao ambiente no tenant', () => {
     requestPath: '/api/v1/produtos/consultar-eans',
     orderWebhookUrl: 'https://cliente.example/webhook/order-token',
   });
+});
+
+test('aceita webhook redigido pelo Unicommerce sem deixar de validar os demais campos', () => {
+  const required = {
+    baseUrl: 'https://hub.example',
+    unidadeId: 3,
+    requestPath: '/api/v1/produtos/consultar-eans',
+    orderWebhookUrl: 'https://cliente.example/webhook/segredo',
+  };
+  const tenant = {
+    status: 'inactive',
+    hasErpCredentials: true,
+    erpConfig: {
+      baseUrl: required.baseUrl,
+      unidadeId: required.unidadeId,
+      requestPath: required.requestPath,
+    },
+  };
+
+  assert.equal(tenantConfigurationIsValid(tenant, required, 3), true);
+  assert.equal(tenantConfigurationIsValid({ ...tenant, erpConfig: { ...tenant.erpConfig, unidadeId: 4 } }, required, 3), false);
+  assert.equal(tenantConfigurationIsValid({ ...tenant, erpConfig: { ...tenant.erpConfig, orderWebhookUrl: null } }, required, 3), false);
 });
 
 test('retry com tenant existente volta para reconciliacao do Unicommerce', () => {

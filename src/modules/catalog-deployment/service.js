@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError, publicError } from './errors.js';
 import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
-import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob } from './tenant-routing.js';
+import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
 import { buildStorefrontDomain } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
@@ -403,7 +403,7 @@ async function provisionCommerce(deployment, units, assets) {
       const tenantId = tenant.id; await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { unicommerceTenantId: String(tenantId), status: 'unicommerce_tenant_created' } });
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath, hasOrderWebhookUrl: true } });
       const confirmed = await trackedStep(deployment.id, unit.id, 'unicommerce_validate_tenant', () => commerce.getTenant(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId) }, response: (value) => ({ tenantId: String(value.id), status: value.status, hasCredential: value.hasErpCredentials === true }) });
-      if (Number(confirmed.erpConfig?.unidadeId) !== Number(unit.hubSellerUnitId) || confirmed.erpConfig?.baseUrl !== requiredErpConfig.baseUrl || confirmed.erpConfig?.requestPath !== requiredErpConfig.requestPath || confirmed.erpConfig?.orderWebhookUrl !== requiredErpConfig.orderWebhookUrl || confirmed.hasErpCredentials !== true || confirmed.status !== 'inactive') throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
+      if (!tenantConfigurationIsValid(confirmed, requiredErpConfig, unit.hubSellerUnitId)) throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding) } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'unicommerce_ready' } });
     } catch (error) { await failUnit(deployment, unit, error); }
