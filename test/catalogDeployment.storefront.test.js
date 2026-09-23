@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildStorefrontDomain } from '../src/modules/catalog-deployment/storefront.js';
+import { buildStorefrontDomain, selectStorefrontDomain } from '../src/modules/catalog-deployment/storefront.js';
 
 test('gera alias vercel.app pela arroba informada no setup', () => {
   const domain = buildStorefrontDomain({
@@ -31,6 +31,24 @@ test('mantem o label no limite DNS com hash deterministico', () => {
 test('rejeita sufixo de dominio invalido', () => {
   assert.throws(
     () => buildStorefrontDomain({ username: 'rede', unit: { id: 'unit-1', code: 'M', isInitial: true }, suffix: 'dominio invalido' }),
+    (error) => error.code === 'STOREFRONT_DOMAIN_INVALID',
+  );
+});
+
+test('preserva o dominio ja associado ao tenant em uma reconciliacao', () => {
+  const domain = selectStorefrontDomain({
+    tenantDomain: 'Unicommerce-Eight.Vercel.App',
+    username: 'complexopharma',
+    unit: { id: 'unit-1', code: 'CASTELAO', isInitial: true },
+    prefix: 'whatsapp',
+    suffix: 'vercel.app',
+  });
+  assert.equal(domain, 'unicommerce-eight.vercel.app');
+});
+
+test('rejeita dominio legado invalido antes de chamar a Vercel', () => {
+  assert.throws(
+    () => selectStorefrontDomain({ tenantDomain: 'dominio invalido', username: 'rede', unit: { isInitial: true } }),
     (error) => error.code === 'STOREFRONT_DOMAIN_INVALID',
   );
 });

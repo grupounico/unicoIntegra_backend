@@ -43,3 +43,18 @@ export function buildStorefrontDomain({ username, unit, prefix = 'whatsapp', suf
   }
   return hostname;
 }
+
+export function selectStorefrontDomain({ persistedDomain, tenantDomain, ...generated }) {
+  const existing = String(persistedDomain || tenantDomain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  if (!existing) return buildStorefrontDomain(generated);
+  const labels = existing.split('.');
+  if (existing.length > 253 || labels.length < 2 || labels.some((item) => !item || item.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(item))) {
+    throw new DeploymentError('STOREFRONT_DOMAIN_INVALID', 'O domínio já associado ao tenant é inválido.', {
+      statusCode: 409,
+      stage: 'provisioning_storefront',
+      action: 'Revise o domínio configurado no UnicommerceBack antes de repetir.',
+    });
+  }
+  return existing;
+}
