@@ -11,6 +11,19 @@ export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig =
   };
 }
 
+export function tenantConfigurationIsValid(tenant, requiredErpConfig, hubSellerUnitId) {
+  const config = tenant?.erpConfig || {};
+  const webhookIsVisible = Object.prototype.hasOwnProperty.call(config, 'orderWebhookUrl');
+  const webhookMatches = !webhookIsVisible || config.orderWebhookUrl === requiredErpConfig.orderWebhookUrl;
+
+  return Number(config.unidadeId) === Number(hubSellerUnitId)
+    && config.baseUrl === requiredErpConfig.baseUrl
+    && config.requestPath === requiredErpConfig.requestPath
+    && webhookMatches
+    && tenant?.hasErpCredentials === true
+    && tenant?.status === 'inactive';
+}
+
 export function resumableUnitStatus(unit) {
   if (unit.hubIntegrationId) {
     if (unit.unicommerceTenantId) return 'catalog_active';
