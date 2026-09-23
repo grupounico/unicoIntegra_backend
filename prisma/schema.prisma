@@ -339,7 +339,9 @@ model ClientDeploymentUnit {
 
   @@unique([deploymentId, code])
   @@unique([deploymentId, provider, sourceUnitId])
-  @@unique([hubSellerUnitId])
+  // IDs de unidade pertencem ao banco de cada ambiente do Hub. Staging e
+  // producao podem gerar o mesmo valor numerico para lojas diferentes.
+  @@index([hubSellerUnitId])
   @@index([deploymentId, status])
   @@index([status, nextRunPollAt])
   @@index([bancoUnicoImportJobId])
