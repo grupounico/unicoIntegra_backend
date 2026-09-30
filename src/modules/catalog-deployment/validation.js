@@ -57,6 +57,10 @@ function requiredString(value, field, max) {
   return normalized;
 }
 
+function requiredUppercaseString(value, field, max) {
+  return requiredString(value, field, max).toLocaleUpperCase('pt-BR');
+}
+
 function httpsUrl(value, field) {
   let parsed;
   try {
@@ -96,8 +100,8 @@ export function validateUnitUpdatePayload(payload) {
   }
 
   const value = {};
-  if (payload.codigo !== undefined) value.code = requiredString(payload.codigo, 'codigo', 100);
-  if (payload.nome !== undefined) value.name = requiredString(payload.nome, 'nome', 255);
+  if (payload.codigo !== undefined) value.code = requiredUppercaseString(payload.codigo, 'codigo', 100);
+  if (payload.nome !== undefined) value.name = requiredUppercaseString(payload.nome, 'nome', 255);
   if (payload.cnpj !== undefined) {
     const cnpj = digits(payload.cnpj);
     if (!isValidCnpj(cnpj)) throw new DeploymentError('INVALID_CNPJ', 'O CNPJ da unidade é inválido.', { statusCode: 400, stage: 'validation' });
@@ -128,7 +132,7 @@ export function validateCreatePayload(payload) {
   const group = payload?.group || {};
   const groupCnpj = digits(group.cnpj);
   if (!isValidCnpj(groupCnpj)) throw new DeploymentError('INVALID_CNPJ', 'O CNPJ do grupo é inválido.', { statusCode: 400, stage: 'validation' });
-  const groupName = requiredString(group.nome, 'group.nome', 255);
+  const groupName = requiredUppercaseString(group.nome, 'group.nome', 255);
   const username = requiredString(group.username, 'group.username', 51).replace(/^@/, '');
   if (!username || username.length > 50) throw new DeploymentError('INVALID_USERNAME', 'group.username deve ter no máximo 50 caracteres.', { statusCode: 400, stage: 'validation' });
   if (!/^[A-Za-z0-9._-]+$/.test(username)) throw new DeploymentError('INVALID_USERNAME', 'group.username deve ser informado sem espaços.', { statusCode: 400, stage: 'validation' });
@@ -136,7 +140,7 @@ export function validateCreatePayload(payload) {
   if (payload.units.filter((unit) => unit.initial === true).length > 1) throw new DeploymentError('MULTIPLE_INITIAL_UNITS', 'Somente uma unidade pode ser inicial.', { statusCode: 400, stage: 'validation' });
   const codes = new Set(); const sources = new Set();
   const units = payload.units.map((unit, index) => {
-    const code = requiredString(unit.codigo, `units[${index}].codigo`, 100);
+    const code = requiredUppercaseString(unit.codigo, `units[${index}].codigo`, 100);
     if (codes.has(code.toLowerCase())) throw new DeploymentError('DUPLICATE_UNIT_CODE', `O código ${code} está duplicado.`, { statusCode: 400, stage: 'validation' });
     codes.add(code.toLowerCase());
     const cnpj = digits(unit.cnpj);
@@ -152,7 +156,7 @@ export function validateCreatePayload(payload) {
     if (!Number.isInteger(threshold) || threshold < 0 || threshold > 10000) throw new DeploymentError('INVALID_EAN_THRESHOLD', 'validEanDropThresholdBps deve estar entre 0 e 10000.', { statusCode: 400, stage: 'validation' });
     const provider = unit.provider || 'alpha7';
     if (provider !== 'alpha7') throw new DeploymentError('UNSUPPORTED_PROVIDER', 'A primeira versão suporta apenas alpha7.', { statusCode: 400, stage: 'validation' });
-    return { code, name: requiredString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
+    return { code, name: requiredUppercaseString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
       credentialRef, provider, publicationMode: 'automatic', pageSize,
       validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true,
       orderWebhookUrl: httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) };
