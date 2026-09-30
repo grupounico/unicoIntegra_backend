@@ -6,6 +6,23 @@ const payload = () => ({ group: { cnpj: '11.222.333/0001-81', nome: 'Rede Saúde
 
 test('valida CNPJ com dígitos verificadores', () => { assert.equal(isValidCnpj('11.222.333/0001-81'), true); assert.equal(isValidCnpj('11.222.333/0001-82'), false); assert.equal(isValidCnpj('00.000.000/0000-00'), false); });
 test('normaliza slug de grupo e unidade', () => assert.equal(slugify(' Rede Saúde -- CENTRO '), 'rede-saude-centro'));
+test('normaliza grupo, loja e código em maiúsculas ao criar a implantação', () => {
+  const value = payload();
+  value.units.push({
+    ...value.units[0],
+    codigo: '  filial norte  ',
+    nome: 'drogaria São João',
+    cnpj: '45.723.174/0001-10',
+    sourceUnitId: 2,
+  });
+  const validated = validateCreatePayload(value);
+  assert.equal(validated.group.nome, 'REDE SAÚDE');
+  assert.equal(validated.units[0].code, 'CENTRO');
+  assert.equal(validated.units[0].name, 'FARMÁCIA CENTRO');
+  assert.equal(validated.units[1].code, 'FILIAL NORTE');
+  assert.equal(validated.units[1].name, 'DROGARIA SÃO JOÃO');
+  assert.equal(validated.units[1].slug, 'rede-saude-filial-norte');
+});
 test('preserva o slug explícito do tenant', () => { const value = payload(); value.units[0].slug = 'whatsapp-complexopharma'; assert.equal(validateCreatePayload(value).units[0].slug, 'whatsapp-complexopharma'); });
 test('gate de cobertura rejeita 94,99% e aceita 95%', () => { assert.equal(meetsCoverageGate(94.99), false); assert.equal(meetsCoverageGate(95), true); });
 test('aplica defaults e escolhe a primeira unidade', () => { const value = validateCreatePayload(payload()); assert.equal(value.units[0].initial, true); assert.equal(value.units[0].publicationMode, 'automatic'); assert.equal(value.units[0].pageSize, 500); assert.equal(value.units[0].validEanDropThresholdBps, 1000); });
@@ -21,6 +38,12 @@ test('exige webhook de pedidos HTTPS por unidade', () => {
 test('hash canônico ignora ordem das chaves', () => assert.equal(canonicalHash({ b: 2, a: 1 }), canonicalHash({ a: 1, b: 2 })));
 test('valida correção parcial da unidade sem exigir novamente os segredos preservados', () => {
   assert.deepEqual(validateUnitUpdatePayload({ pageSize: 250, validEanDropThresholdBps: 750 }), { pageSize: 250, validEanDropThresholdBps: 750 });
+});
+test('mantém nome e código da unidade em maiúsculas nas correções', () => {
+  assert.deepEqual(validateUnitUpdatePayload({ codigo: '  loja centro  ', nome: 'farmácia saúde' }), {
+    code: 'LOJA CENTRO',
+    name: 'FARMÁCIA SAÚDE',
+  });
 });
 test('normaliza novos segredos no fluxo de correção', () => {
   const value = validateUnitUpdatePayload({ credentialRef: 'postgresql://user:pass@db.example:5432/client', orderWebhookUrl: 'https://cliente.example/pedidos' });
