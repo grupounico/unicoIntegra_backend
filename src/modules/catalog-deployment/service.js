@@ -20,7 +20,7 @@ const RUN_SUCCESS = new Set(['published']);
 const RUN_FAILURE = new Set(['failed', 'rejected', 'error', 'cancelled']);
 const UNIT_PROGRESS = {
   pending: 0, hub_unit_created: 10, integration_created: 20, scheduled: 25,
-  running: 35, shadow_ready: 45, catalog_active: 55,
+  running: 35, shadow_ready: 45, activating_shadow: 45, catalog_active: 55,
   unicommerce_tenant_created: 65, unicommerce_ready: 75,
   banco_unico_importing: 85, awaiting_activation: 95, active: 100,
   failed: 0, reconciliation_required: 0,
@@ -305,7 +305,7 @@ async function provisionHub(deployment, units) {
           status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status,
           latestProcessedRows: 0, latestValidRows: 0, latestPublishedRows: 0,
           latestRunScheduledAt: now, latestRunStartedAt: null, latestRunFinishedAt: null,
-          latestRunPolledAt: null, nextRunPollAt: now, runNotFoundCount: 0,
+          latestRunPolledAt: null, nextRunPollAt: new Date(now.getTime() + env.DEPLOYMENT_HUB_POLL_INTERVAL_MS), runNotFoundCount: 0,
           monitoringDelayedAt: null, lastErrorCode: null, lastErrorMessage: null, retryable: false,
         } });
       }
@@ -317,7 +317,7 @@ async function monitorHub(deployment, units) {
   const targets = catalogTargets(deployment.environment);
   const apiKey = decryptSecret((await prisma.clientDeployment.findUnique({ where: { id: deployment.id } })).sellerApiKeyEncrypted);
   let waiting = false;
-  for (const unit of units.filter((item) => ['scheduled', 'running'].includes(item.status))) {
+  for (const unit of units.filter((item) => ['scheduled', 'running', 'activating_shadow'].includes(item.status))) {
     const now = new Date();
     if (unit.nextRunPollAt && unit.nextRunPollAt > now) {
       waiting = true;
@@ -343,12 +343,27 @@ async function monitorHub(deployment, units) {
       const processedRows = Number(run.processedRows ?? run.sourceRows ?? 0);
       const validRows = Number(run.validRows || 0);
       const publishedRows = Number(run.publishedRows ?? (status === 'published' ? validRows : 0));
+      if (unit.status === 'activating_shadow' && status === 'shadow') {
+        hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, expectedRunId, unit.id, `${deployment.id}:${unit.id}:activate:${expectedRunId}`);
+        waiting = true;
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+          status: 'activating_shadow', latestRunId: expectedRunId, latestRunStatus: status,
+          latestProcessedRows: processedRows, latestValidRows: validRows, latestPublishedRows: publishedRows,
+          latestRunStartedAt: run.startedAt ? new Date(run.startedAt) : unit.latestRunStartedAt,
+          latestRunFinishedAt: run.finishedAt ? new Date(run.finishedAt) : unit.latestRunFinishedAt,
+          latestRunPolledAt: now, nextRunPollAt: new Date(now.getTime() + env.DEPLOYMENT_HUB_POLL_INTERVAL_MS),
+          runNotFoundCount: 0,
+        } });
+        await eventIfChanged(deployment.id, 'hub_activation_pending', unit.id, { runId: expectedRunId, status });
+        continue;
+      }
       const delayed = !RUN_SUCCESS.has(status) && !RUN_FAILURE.has(status)
         && now.getTime() - (unit.latestRunScheduledAt || deployment.startedAt || now).getTime() >= env.DEPLOYMENT_HUB_DELAY_WARNING_MS;
       if (status !== unit.latestRunStatus) await event(deployment.id, 'hub_run_status_changed', { unitId: unit.id, fromStatus: unit.latestRunStatus, toStatus: status, metadata: { runId: expectedRunId, processedRows, validRows, publishedRows } });
       if (delayed && !unit.monitoringDelayedAt) await event(deployment.id, 'hub_run_delayed', { unitId: unit.id, metadata: { runId: expectedRunId, warningAfterMs: env.DEPLOYMENT_HUB_DELAY_WARNING_MS } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
-        status: RUN_SUCCESS.has(status) ? 'running' : RUN_FAILURE.has(status) ? 'failed' : 'running',
+        status: RUN_SUCCESS.has(status) ? 'running' : RUN_FAILURE.has(status) ? 'failed'
+          : unit.status === 'activating_shadow' ? 'activating_shadow' : 'running',
         latestRunId: expectedRunId, latestRunStatus: status,
         latestProcessedRows: processedRows, latestValidRows: validRows, latestPublishedRows: publishedRows,
         latestRunStartedAt: run.startedAt ? new Date(run.startedAt) : unit.latestRunStartedAt,
@@ -918,7 +933,7 @@ export async function runUnit(deploymentId, unitId, idempotencyKey) {
     status: 'scheduled', latestRunId: run.runId, latestRunStatus: run.status,
     latestProcessedRows: 0, latestValidRows: 0, latestPublishedRows: 0,
     latestRunScheduledAt: now, latestRunStartedAt: null, latestRunFinishedAt: null,
-    latestRunPolledAt: null, nextRunPollAt: now, runNotFoundCount: 0, monitoringDelayedAt: null,
+    latestRunPolledAt: null, nextRunPollAt: new Date(now.getTime() + env.DEPLOYMENT_HUB_POLL_INTERVAL_MS), runNotFoundCount: 0, monitoringDelayedAt: null,
     lastErrorCode: null, lastErrorMessage: null,
   } });
   await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } }); return getDeployment(deploymentId);
@@ -931,8 +946,22 @@ export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
   if (unit.status !== 'shadow_ready' || Number(unit.latestValidRows || 0) <= 0) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'A unidade não possui snapshot shadow válido.', { statusCode: 409, stage: 'activating_shadow', unitId });
   if (!unit.latestRunId) throw new DeploymentError('HUB_RUN_ID_MISSING', 'A execução não possui um identificador para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Execute uma nova carga antes de ativar o snapshot.' });
-  const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted); const targets = catalogTargets(deployment.environment); await hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, unit.latestRunId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`); await hub.validateCatalog(targets.hub, apiKey, unit.hubSellerUnitId, unitId);
-  await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'catalog_active' } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued' } }); return getDeployment(deploymentId);
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: {
+      status: 'activating_shadow', latestRunStatus: 'activation_requested',
+      latestRunPolledAt: null, nextRunPollAt: new Date(now.getTime() + env.DEPLOYMENT_HUB_POLL_INTERVAL_MS),
+      runNotFoundCount: 0, monitoringDelayedAt: null, lastErrorCode: null, lastErrorMessage: null,
+    } }),
+    prisma.clientDeployment.update({ where: { id: deploymentId }, data: {
+      status: 'validating_hub_catalog', currentStage: 'activating_shadow',
+      lastErrorCode: null, lastErrorMessage: null, retryable: false,
+    } }),
+  ]);
+  await event(deploymentId, 'hub_activation_requested', { unitId, fromStatus: unit.status, toStatus: 'activating_shadow', metadata: { runId: unit.latestRunId } });
+  const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted);
+  hub.activateSnapshot(catalogTargets(deployment.environment).hub, apiKey, unit.hubIntegrationId, unit.latestRunId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
+  return getDeployment(deploymentId);
 }
 
 export async function cancelDeployment(id, actor) { const current = await prisma.clientDeployment.findUnique({ where: { id } }); if (!current) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 }); if (current.status === 'completed') throw new DeploymentError('DEPLOYMENT_ALREADY_ACTIVE', 'Uma implantação concluída não pode ser cancelada.', { statusCode: 409 }); await prisma.clientDeployment.update({ where: { id }, data: { status: 'cancelled', currentStage: 'cancelled', finishedAt: new Date(), workerId: null } }); await event(id, 'deployment_cancelled', { fromStatus: current.status, toStatus: 'cancelled', createdBy: actor }); return getDeployment(id); }
