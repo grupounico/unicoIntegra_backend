@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { getRun, scheduleRun, updateIntegration } from '../src/modules/catalog-deployment/adapters/hub.client.js';
+import { activateSnapshot, getRun, scheduleRun, updateIntegration } from '../src/modules/catalog-deployment/adapters/hub.client.js';
 
 async function requestBody(request) {
   const chunks = [];
@@ -65,4 +65,32 @@ test('atualiza somente a configuração operacional permitida da integração', 
   const updated = await updateIntegration(target, 'seller-secret', 23, { credentialRef: 'postgresql://user:pass@db.example:5432/client', pageSize: 250 }, 'unit-1');
   assert.equal(updated.integrationId, 23);
   assert.equal(updated.pageSize, 250);
+});
+
+test('dispara a ativação sem esperar a resposta do Hub', async (context) => {
+  const runId = '1a92d969-03a7-4b0d-9920-1b9811a98727';
+  let releaseResponse;
+  const responseGate = new Promise((resolve) => { releaseResponse = resolve; });
+  let markReceived;
+  const received = new Promise((resolve) => { markReceived = resolve; });
+  const server = http.createServer(async (request, response) => {
+    assert.equal(request.method, 'POST');
+    assert.equal(request.url, '/api/v1/integration/catalog-sync/23/activate');
+    assert.equal(request.headers['x-api-key'], 'seller-secret');
+    assert.equal(request.headers['idempotency-key'], 'activate-key');
+    assert.deepEqual(await requestBody(request), { runId });
+    markReceived();
+    await responseGate;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ status: 'automatic', integrationId: 23, runId }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => server.close());
+  const target = { baseUrl: `http://127.0.0.1:${server.address().port}` };
+
+  const dispatched = activateSnapshot(target, 'seller-secret', 23, runId, 'unit-1', 'activate-key');
+  assert.deepEqual(dispatched, { dispatched: true, integrationId: 23, runId });
+  await received;
+  releaseResponse();
+  await new Promise((resolve) => setImmediate(resolve));
 });

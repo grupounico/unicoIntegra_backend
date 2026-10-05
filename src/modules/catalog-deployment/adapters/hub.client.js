@@ -88,12 +88,26 @@ export async function getIntegration(target, apiKey, integrationId, unitId) {
   } catch (error) { throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId); }
 }
 
-export async function activateSnapshot(target, apiKey, integrationId, runId, unitId, idempotencyKey) {
-  try { await withRetry(() => sellerClient(target, apiKey).post(`/api/v1/integration/catalog-sync/${integrationId}/activate`, { runId }, { headers: { 'Idempotency-Key': idempotencyKey } })); }
-  catch (error) {
-    if (error.response?.status === 409) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'Não existe snapshot shadow válido para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Revise a carga e execute novamente.' });
-    throw mapUpstreamError(error, 'HUB', 'activating_shadow', unitId);
-  }
+export function activateSnapshot(target, apiKey, integrationId, runId, unitId, idempotencyKey) {
+  const request = withRetry(() => sellerClient(target, apiKey).post(
+    `/api/v1/integration/catalog-sync/${integrationId}/activate`,
+    { runId },
+    { headers: { 'Idempotency-Key': idempotencyKey } },
+  ));
+  void request.catch((error) => {
+    const mapped = error.response?.status === 409
+      ? new DeploymentError('HUB_SHADOW_NOT_READY', 'Não existe snapshot shadow válido para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Revise a carga e execute novamente.' })
+      : mapUpstreamError(error, 'HUB', 'activating_shadow', unitId);
+    console.warn(JSON.stringify({
+      event: 'hub_snapshot_activation_request_failed',
+      integrationId: Number(integrationId),
+      runId: String(runId),
+      unitId,
+      code: mapped.code || 'HUB_ACTIVATION_REQUEST_FAILED',
+      statusCode: mapped.statusCode || null,
+    }));
+  });
+  return { dispatched: true, integrationId: Number(integrationId), runId: String(runId) };
 }
 
 export async function validateCatalog(target, apiKey, sellerUnitId, unitId) {
