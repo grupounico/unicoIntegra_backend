@@ -50,6 +50,34 @@ test('rejeita agendamento quando o Hub não devolve runId', async (context) => {
   await assert.rejects(() => scheduleRun(target, 'seller-secret', 23, 'unit-1', 'schedule-key'), (error) => error.code === 'HUB_INVALID_RESPONSE');
 });
 
+test('ignora o corpo imediato da ativação e acompanha o mesmo run', async (context) => {
+  const expectedRunId = '1a92d969-03a7-4b0d-9920-1b9811a98727';
+  const server = http.createServer(async (request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'POST' && request.url === '/api/v1/integration/catalog-sync/23/activate') {
+      assert.equal(request.headers['idempotency-key'], 'activate-key');
+      assert.deepEqual(await requestBody(request), { runId: expectedRunId });
+      response.writeHead(202);
+      response.end(JSON.stringify({ status: 'accepted', runId: 'resposta-nao-confiavel' }));
+      return;
+    }
+    if (request.method === 'GET' && request.url === `/api/v1/integration/catalog-sync/23/runs/${expectedRunId}`) {
+      response.writeHead(200);
+      response.end(JSON.stringify({ status: 'published', integrationId: 23, runId: expectedRunId, processedRows: 10, validRows: 9, publishedRows: 9 }));
+      return;
+    }
+    response.writeHead(404); response.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => server.close());
+  const target = { baseUrl: `http://127.0.0.1:${server.address().port}` };
+
+  await activateSnapshot(target, 'seller-secret', 23, expectedRunId, 'unit-1', 'activate-key');
+  const run = await getRun(target, 'seller-secret', 23, expectedRunId, 'unit-1');
+  assert.equal(run.runId, expectedRunId);
+  assert.equal(run.status, 'published');
+});
+
 test('atualiza somente a configuração operacional permitida da integração', async (context) => {
   const server = http.createServer(async (request, response) => {
     assert.equal(request.method, 'PATCH');

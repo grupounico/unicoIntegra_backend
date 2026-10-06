@@ -11,6 +11,7 @@ export const list = handler((req) => service.listDeployments(req.query || {}));
 export const get = handler((req) => service.getDeployment(req.params.deploymentId));
 export const updateUnit = handler((req) => service.updateDeploymentUnit(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const start = handler((req) => service.startDeployment(req.params.deploymentId, actor(req)), 202);
+export const refreshRuns = handler((req) => service.refreshDeploymentRuns(req.params.deploymentId));
 export const retry = handler((req) => service.retryDeployment(req.params.deploymentId, actor(req)), 202);
 export const retryUnit = handler((req) => service.retryUnit(req.params.deploymentId, req.params.unitId, actor(req)), 202);
 export const runUnit = handler((req) => service.runUnit(req.params.deploymentId, req.params.unitId, key(req)), 202);

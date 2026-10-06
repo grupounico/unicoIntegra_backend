@@ -129,6 +129,8 @@ export function validateUnitUpdatePayload(payload) {
 }
 
 export function validateCreatePayload(payload) {
+  const flowMode = payload?.flowMode || 'full';
+  if (!['full', 'hub_banco_only'].includes(flowMode)) throw new DeploymentError('INVALID_FLOW_MODE', 'flowMode deve ser full ou hub_banco_only.', { statusCode: 400, stage: 'validation' });
   const group = payload?.group || {};
   const groupCnpj = digits(group.cnpj);
   if (!isValidCnpj(groupCnpj)) throw new DeploymentError('INVALID_CNPJ', 'O CNPJ do grupo é inválido.', { statusCode: 400, stage: 'validation' });
@@ -159,8 +161,8 @@ export function validateCreatePayload(payload) {
     return { code, name: requiredUppercaseString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
       credentialRef, provider, publicationMode: 'automatic', pageSize,
       validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true,
-      orderWebhookUrl: httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) };
+      orderWebhookUrl: flowMode === 'full' ? httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) : null };
   });
   if (!units.some((unit) => unit.initial)) units[0].initial = true;
-  return { group: { cnpj: groupCnpj, nome: groupName, username }, units, requestedBy: String(payload.requestedBy || 'Sistema').trim() || 'Sistema' };
+  return { flowMode, group: { cnpj: groupCnpj, nome: groupName, username }, units, requestedBy: String(payload.requestedBy || 'Sistema').trim() || 'Sistema' };
 }

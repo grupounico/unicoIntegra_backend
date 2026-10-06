@@ -35,6 +35,19 @@ test('exige webhook de pedidos HTTPS por unidade', () => {
   const insecure = payload(); insecure.units[0].orderWebhookUrl = 'http://cliente.example/webhook/token';
   assert.throws(() => validateCreatePayload(insecure), (error) => error.code === 'INVALID_ORDER_WEBHOOK_URL');
 });
+test('modo Hub e Banco Único dispensa webhook e mantém o modo normalizado', () => {
+  const value = payload();
+  value.flowMode = 'hub_banco_only';
+  delete value.units[0].orderWebhookUrl;
+  const validated = validateCreatePayload(value);
+  assert.equal(validated.flowMode, 'hub_banco_only');
+  assert.equal(validated.units[0].orderWebhookUrl, null);
+});
+test('rejeita modo de fluxo desconhecido', () => {
+  const value = payload();
+  value.flowMode = 'hub_only';
+  assert.throws(() => validateCreatePayload(value), (error) => error.code === 'INVALID_FLOW_MODE');
+});
 test('hash canônico ignora ordem das chaves', () => assert.equal(canonicalHash({ b: 2, a: 1 }), canonicalHash({ a: 1, b: 2 })));
 test('valida correção parcial da unidade sem exigir novamente os segredos preservados', () => {
   assert.deepEqual(validateUnitUpdatePayload({ pageSize: 250, validEanDropThresholdBps: 750 }), { pageSize: 250, validEanDropThresholdBps: 750 });

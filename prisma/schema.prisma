@@ -244,6 +244,7 @@ model ClientDeployment {
   groupCnpj                String                  @db.VarChar(14)
   groupName                String                  @db.VarChar(255)
   username                 String                  @db.VarChar(50)
+  flowMode                 String                  @default("full") @db.VarChar(30)
   environment              String                  @default("production") @db.VarChar(20)
   promotedFromDeploymentId String?                 @db.Uuid
   status                   String                  @default("draft") @db.VarChar(50)
