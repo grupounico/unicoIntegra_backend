@@ -31,7 +31,7 @@ export async function createUnit(target, sellerId, unit, idempotencyKey) {
 
 export async function createIntegration(target, apiKey, unit, credentialRef, idempotencyKey) {
   try {
-    const response = await withRetry(() => sellerClient(target, apiKey).post('/api/v1/integration/catalog-sync', { sellerUnitId: Number(unit.hubSellerUnitId), provider: unit.provider, sourceUnitId: unit.sourceUnitId, credentialRef, publicationMode: unit.publicationMode, pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps }, { headers: { 'Idempotency-Key': idempotencyKey } }));
+    const response = await withRetry(() => sellerClient(target, apiKey).post('/api/v1/integration/catalog-sync', { sellerUnitId: Number(unit.hubSellerUnitId), provider: unit.provider, sourceUnitId: Number(unit.sourceUnitId), credentialRef, publicationMode: unit.publicationMode, pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps }, { headers: { 'Idempotency-Key': idempotencyKey } }));
     const integrationId = response.data?.integracao?.integrationId;
     if (!integrationId) throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub não retornou o ID da integração.', { stage: 'creating_integrations', unitId: unit.id });
     return { integrationId };

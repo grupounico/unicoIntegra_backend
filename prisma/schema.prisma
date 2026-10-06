@@ -290,7 +290,7 @@ model ClientDeploymentUnit {
   slug                        String                  @db.VarChar(100)
   isInitial                   Boolean                 @default(false)
   provider                    String                  @default("alpha7") @db.VarChar(30)
-  sourceUnitId                Int
+  sourceUnitId                BigInt
   credentialRefEncrypted      String?
   credentialExpiresAt         DateTime?               @db.Timestamp(6)
   orderWebhookUrlEncrypted    String?

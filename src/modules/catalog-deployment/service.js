@@ -80,6 +80,7 @@ function formatDeployment(value) {
   const safe = jsonSafe(value);
   delete safe.sellerApiKeyEncrypted;
   safe.units?.forEach((unit) => {
+    unit.sourceUnitId = Number(unit.sourceUnitId);
     unit.hasCredential = Boolean(unit.credentialRefEncrypted);
     unit.hasOrderWebhookUrl = Boolean(unit.orderWebhookUrlEncrypted);
     delete unit.credentialRefEncrypted;
@@ -126,7 +127,7 @@ export async function createDeployment(payload, idempotencyKey, correlationId) {
     username: normalized.group.username, flowMode: normalized.flowMode, environment, requestedBy: normalized.requestedBy, correlationId,
     inputSnapshot: sanitizeSnapshot(normalized),
     units: { create: normalized.units.map((unit) => ({ code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug,
-      isInitial: unit.initial, provider: unit.provider, sourceUnitId: unit.sourceUnitId,
+      isInitial: unit.initial, provider: unit.provider, sourceUnitId: BigInt(unit.sourceUnitId),
       credentialRefEncrypted: encryptSecret(unit.credentialRef), orderWebhookUrlEncrypted: unit.orderWebhookUrl ? encryptSecret(unit.orderWebhookUrl) : null, publicationMode: unit.publicationMode,
       pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps })) },
     ...(normalized.flowMode === 'full' ? { assets: { create: ASSET_TYPES.map((type) => ({ type })) } } : {}),
@@ -164,7 +165,8 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
       statusCode: 409, stage: 'editing_unit', unitId, action: 'Crie uma nova implantação caso a identidade da unidade esteja incorreta.',
     });
   }
-  if (unit.hubIntegrationId && changes.sourceUnitId !== undefined && changes.sourceUnitId !== unit.sourceUnitId) {
+  const changedSourceUnitId = changes.sourceUnitId === undefined ? undefined : BigInt(changes.sourceUnitId);
+  if (unit.hubIntegrationId && changedSourceUnitId !== undefined && changedSourceUnitId !== unit.sourceUnitId) {
     throw new DeploymentError('SOURCE_UNIT_LOCKED', 'O ID da unidade no Alpha7 não pode ser alterado porque a integração já existe no Hub.', {
       statusCode: 409, stage: 'editing_unit', unitId, action: 'Solicite a recriação da integração para trocar o ID de origem.',
     });
@@ -174,8 +176,8 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
     const duplicate = await prisma.clientDeploymentUnit.findFirst({ where: { deploymentId, code: { equals: changes.code, mode: 'insensitive' }, NOT: { id: unitId } }, select: { id: true } });
     if (duplicate) throw new DeploymentError('DUPLICATE_UNIT_CODE', 'Este código já está em uso por outra unidade da implantação.', { statusCode: 409, stage: 'editing_unit', unitId });
   }
-  if (changes.sourceUnitId !== undefined && changes.sourceUnitId !== unit.sourceUnitId) {
-    const duplicate = await prisma.clientDeploymentUnit.findFirst({ where: { deploymentId, provider: unit.provider, sourceUnitId: changes.sourceUnitId, NOT: { id: unitId } }, select: { id: true } });
+  if (changedSourceUnitId !== undefined && changedSourceUnitId !== unit.sourceUnitId) {
+    const duplicate = await prisma.clientDeploymentUnit.findFirst({ where: { deploymentId, provider: unit.provider, sourceUnitId: changedSourceUnitId, NOT: { id: unitId } }, select: { id: true } });
     if (duplicate) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', 'Este ID do Alpha7 já está em uso por outra unidade da implantação.', { statusCode: 409, stage: 'editing_unit', unitId });
   }
 
@@ -196,7 +198,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
   assign('code', changes.code, 'codigo');
   assign('name', changes.name, 'nome');
   assign('cnpj', changes.cnpj);
-  assign('sourceUnitId', changes.sourceUnitId);
+  assign('sourceUnitId', changedSourceUnitId);
   assign('pageSize', changes.pageSize);
   assign('validEanDropThresholdBps', changes.validEanDropThresholdBps);
   if (changes.credentialRef !== undefined) { data.credentialRefEncrypted = encryptSecret(changes.credentialRef); changedFields.push('credentialRef'); }
@@ -292,8 +294,8 @@ async function provisionHub(deployment, units) {
   for (const unit of units) {
     try {
       let current = await prisma.clientDeploymentUnit.findUnique({ where: { id: unit.id } });
-      if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, sourceUnitId: current.sourceUnitId }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
-      if (!current.hubIntegrationId) { const stepKey = `${deployment.id}:${unit.id}:integration`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, decryptSecret(current.credentialRefEncrypted), stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, sourceUnitId: current.sourceUnitId, hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } }); }
+      if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, sourceUnitId: Number(current.sourceUnitId) }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
+      if (!current.hubIntegrationId) { const stepKey = `${deployment.id}:${unit.id}:integration`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, decryptSecret(current.credentialRefEncrypted), stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, sourceUnitId: Number(current.sourceUnitId), hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } }); }
       if (current.hubIntegrationId && current.publicationMode !== 'automatic') {
         await trackedStep(deployment.id, unit.id, 'hub_enable_automatic_publication', () => hub.updateIntegration(targets.hub, apiKey, current.hubIntegrationId, { publicationMode: 'automatic' }, current.id), {
           request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId), publicationMode: 'automatic' },

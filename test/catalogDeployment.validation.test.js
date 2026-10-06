@@ -29,6 +29,8 @@ test('aplica defaults e escolhe a primeira unidade', () => { const value = valid
 test('aceita a arroba do setup e persiste somente o username', () => { const value = payload(); value.group.username = '@rede-saude'; assert.equal(validateCreatePayload(value).group.username, 'rede-saude'); });
 test('rejeita provider ainda não suportado', () => { const value = payload(); value.units[0].provider = 'trier'; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'UNSUPPORTED_PROVIDER'); });
 test('rejeita sourceUnitId duplicado', () => { const value = payload(); value.units.push({ ...value.units[0], codigo: 'NORTE', cnpj: '45.723.174/0001-10' }); assert.throws(() => validateCreatePayload(value), (error) => error.code === 'DUPLICATE_SOURCE_UNIT_ID'); });
+test('aceita sourceUnitId maior que o limite de INTEGER do PostgreSQL', () => { const value = payload(); value.units[0].sourceUnitId = 50003840493; assert.equal(validateCreatePayload(value).units[0].sourceUnitId, 50003840493); });
+test('rejeita sourceUnitId fora da faixa segura do JavaScript', () => { const value = payload(); value.units[0].sourceUnitId = Number.MAX_SAFE_INTEGER + 1; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'INVALID_SOURCE_UNIT_ID'); });
 test('exige webhook de pedidos HTTPS por unidade', () => {
   const missing = payload(); delete missing.units[0].orderWebhookUrl;
   assert.throws(() => validateCreatePayload(missing), (error) => error.code === 'INVALID_INPUT');

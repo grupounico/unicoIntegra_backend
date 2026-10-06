@@ -109,7 +109,7 @@ export function validateUnitUpdatePayload(payload) {
   }
   if (payload.sourceUnitId !== undefined) {
     const sourceUnitId = Number(payload.sourceUnitId);
-    if (!Number.isInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', 'sourceUnitId deve ser um número inteiro positivo.', { statusCode: 400, stage: 'validation' });
+    if (!Number.isSafeInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', 'sourceUnitId deve ser um número inteiro positivo válido.', { statusCode: 400, stage: 'validation' });
     value.sourceUnitId = sourceUnitId;
   }
   if (payload.credentialRef !== undefined) value.credentialRef = postgresUrl(payload.credentialRef, 'credentialRef');
@@ -148,7 +148,7 @@ export function validateCreatePayload(payload) {
     const cnpj = digits(unit.cnpj);
     if (!isValidCnpj(cnpj)) throw new DeploymentError('INVALID_CNPJ', `O CNPJ da unidade ${code} é inválido.`, { statusCode: 400, stage: 'validation' });
     const sourceUnitId = Number(unit.sourceUnitId);
-    if (!Number.isInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', `sourceUnitId da unidade ${code} deve ser positivo.`, { statusCode: 400, stage: 'validation' });
+    if (!Number.isSafeInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', `sourceUnitId da unidade ${code} deve ser um inteiro positivo válido.`, { statusCode: 400, stage: 'validation' });
     if (sources.has(sourceUnitId)) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', `sourceUnitId ${sourceUnitId} está duplicado.`, { statusCode: 400, stage: 'validation' });
     sources.add(sourceUnitId);
     const credentialRef = postgresUrl(unit.credentialRef, `units[${index}].credentialRef`);
