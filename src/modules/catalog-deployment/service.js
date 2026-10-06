@@ -142,6 +142,30 @@ export async function getDeployment(id) {
   return formatDeployment(deployment);
 }
 
+export async function revealSellerToken(id, actor) {
+  const deployment = await prisma.clientDeployment.findUnique({
+    where: { id },
+    select: { id: true, hubSellerId: true, sellerApiKeyEncrypted: true },
+  });
+  if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
+  if (!deployment.hubSellerId || !deployment.sellerApiKeyEncrypted) {
+    throw new DeploymentError('HUB_CREDENTIAL_MISSING', 'O token do seller ainda não foi gerado pelo Hub.', {
+      statusCode: 409,
+      stage: 'provisioning_hub',
+      action: 'Aguarde a criação do seller no Hub e tente novamente.',
+    });
+  }
+  await event(id, 'seller_token_revealed', {
+    createdBy: String(actor || 'Sistema').trim() || 'Sistema',
+    metadata: { hubSellerId: String(deployment.hubSellerId) },
+  });
+  return {
+    token: decryptSecret(deployment.sellerApiKeyEncrypted),
+    hubSellerId: String(deployment.hubSellerId),
+    header: 'X-API-Key',
+  };
+}
+
 const EDITABLE_DEPLOYMENT_STATUSES = new Set(['draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required']);
 
 export async function updateDeploymentUnit(deploymentId, unitId, payload, actor) {

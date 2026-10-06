@@ -9,6 +9,15 @@ function handler(operation, success = 200) { return async (req, res) => { try { 
 export const create = handler((req) => service.createDeployment(req.body || {}, key(req), correlation(req)), 202);
 export const list = handler((req) => service.listDeployments(req.query || {}));
 export const get = handler((req) => service.getDeployment(req.params.deploymentId));
+export async function revealSellerToken(req, res) {
+  res.set('Cache-Control', 'no-store, private');
+  res.set('Pragma', 'no-cache');
+  try {
+    return res.json(await service.revealSellerToken(req.params.deploymentId, actor(req)));
+  } catch (error) {
+    return res.status(error.statusCode || 500).json(publicError(error, { deploymentId: req.params.deploymentId }));
+  }
+}
 export const updateUnit = handler((req) => service.updateDeploymentUnit(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const start = handler((req) => service.startDeployment(req.params.deploymentId, actor(req)), 202);
 export const refreshRuns = handler((req) => service.refreshDeploymentRuns(req.params.deploymentId));
