@@ -1,5 +1,8 @@
 import { publicError } from './errors.js';
 import * as service from './service.js';
+import { saveAtenderBemConfiguration, createAtenderBemGroup } from './atenderbem-service.js';
+import { getAtenderBemSettings } from './atenderbem-config.js';
+import { startAtenderBemImport, checkAtenderBemImport } from './atenderbem-import.js';
 
 function actor(req) { return String(req.body?.requestedBy || req.headers['x-operator-name'] || 'Sistema').trim() || 'Sistema'; }
 function correlation(req) { return String(req.headers['x-correlation-id'] || req.headers['x-request-id'] || '').trim() || null; }
@@ -9,6 +12,7 @@ function handler(operation, success = 200) { return async (req, res) => { try { 
 export const create = handler((req) => service.createDeployment(req.body || {}, key(req), correlation(req)), 202);
 export const list = handler((req) => service.listDeployments(req.query || {}));
 export const get = handler((req) => service.getDeployment(req.params.deploymentId));
+export const atenderBemSettings = handler(() => getAtenderBemSettings());
 export async function revealSellerToken(req, res) {
   res.set('Cache-Control', 'no-store, private');
   res.set('Pragma', 'no-cache');
@@ -19,6 +23,10 @@ export async function revealSellerToken(req, res) {
   }
 }
 export const updateUnit = handler((req) => service.updateDeploymentUnit(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
+export const saveAtenderBem = handler((req) => saveAtenderBemConfiguration(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
+export const createAtenderBemGroupHandler = handler((req) => createAtenderBemGroup(req.params.deploymentId, req.params.unitId, actor(req)));
+export const startAtenderBemImportHandler = handler((req) => startAtenderBemImport(req.params.deploymentId, req.params.unitId, actor(req)), 202);
+export const checkAtenderBemImportHandler = handler((req) => checkAtenderBemImport(req.params.deploymentId, req.params.unitId));
 export const start = handler((req) => service.startDeployment(req.params.deploymentId, actor(req)), 202);
 export const refreshRuns = handler((req) => service.refreshDeploymentRuns(req.params.deploymentId));
 export const retry = handler((req) => service.retryDeployment(req.params.deploymentId, actor(req)), 202);
