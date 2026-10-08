@@ -85,6 +85,7 @@ function formatDeployment(value) {
     unit.hasOrderWebhookUrl = Boolean(unit.orderWebhookUrlEncrypted);
     delete unit.credentialRefEncrypted;
     delete unit.orderWebhookUrlEncrypted;
+    delete unit.atenderBemSecretsEncrypted;
     unit.hubRun = unit.latestRunId ? {
       runId: unit.latestRunId,
       status: unit.monitoringDelayedAt && !RUN_SUCCESS.has(unit.latestRunStatus) && !RUN_FAILURE.has(unit.latestRunStatus) ? 'delayed' : unit.latestRunStatus,
