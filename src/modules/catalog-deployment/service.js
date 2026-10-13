@@ -635,7 +635,8 @@ async function processHubCatalogUnit(deployment, unit) {
   }
 
   const percentage = Number(current.coveragePercent || job.progressPercent || 0);
-  if (meetsCoverageGate(percentage) && !current.storefrontDomain && !['banco_unico_ready', 'awaiting_activation', 'active'].includes(current.status)) {
+  if (meetsCoverageGate(percentage) && (!current.storefrontDomain || ['unicommerce_ready', 'banco_unico_importing'].includes(current.status))
+      && !['banco_unico_ready', 'awaiting_activation', 'active'].includes(current.status)) {
     if (deployment.flowMode === 'hub_banco_only') {
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'banco_unico_ready' } });
       await event(deployment.id, 'unit_hub_banco_ready', { unitId: unit.id, fromStatus: current.status, toStatus: 'banco_unico_ready', metadata: { sourceType: 'hub_catalog', coveragePercentage: percentage, threshold: 95, jobId: job.id } });
