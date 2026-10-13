@@ -11,7 +11,7 @@ export function buildTenantErpConfig(hubTarget, hubSellerUnitId, currentConfig =
   };
 }
 
-export function tenantConfigurationIsValid(tenant, requiredErpConfig, hubSellerUnitId) {
+export function tenantConfigurationIsValid(tenant, requiredErpConfig, hubSellerUnitId, expectedStatus = 'inactive') {
   const config = tenant?.erpConfig || {};
   const webhookIsVisible = Object.prototype.hasOwnProperty.call(config, 'orderWebhookUrl');
   const webhookMatches = !webhookIsVisible || config.orderWebhookUrl === requiredErpConfig.orderWebhookUrl;
@@ -19,9 +19,21 @@ export function tenantConfigurationIsValid(tenant, requiredErpConfig, hubSellerU
   return Number(config.unidadeId) === Number(hubSellerUnitId)
     && config.baseUrl === requiredErpConfig.baseUrl
     && config.requestPath === requiredErpConfig.requestPath
+    && (requiredErpConfig.inStock === undefined || config.inStock === requiredErpConfig.inStock)
     && webhookMatches
     && tenant?.hasErpCredentials === true
-    && tenant?.status === 'inactive';
+    && tenant?.status === expectedStatus;
+}
+
+export function activatedTenantCanResume(deployment, unit, tenant, requiredErpConfig, hasActivationEvidence) {
+  return hasActivationEvidence
+    && String(tenant?.id) === String(unit.unicommerceTenantId)
+    && tenant?.deploymentId === deployment.id
+    && Number(tenant?.hubSellerId) === Number(deployment.hubSellerId)
+    && Number(tenant?.hubSellerUnitId) === Number(unit.hubSellerUnitId)
+    && Boolean(unit.storefrontDomain)
+    && tenant?.storefrontDomain === unit.storefrontDomain
+    && tenantConfigurationIsValid(tenant, requiredErpConfig, unit.hubSellerUnitId, 'active');
 }
 
 export function resumableUnitStatus(unit) {

@@ -22,15 +22,19 @@ function client(target) {
 function mapVercelError(error, unitId) {
   if (error instanceof DeploymentError) return error;
   const status = Number(error.response?.status || 0);
-  if (status === 401 || status === 403) {
+  if (status === 403) return new DeploymentError('VERCEL_PERMISSION_DENIED', 'O token não permite configurar o projeto Vercel.', {
+    statusCode: 502, stage: 'provisioning_storefront', unitId, httpStatus: status,
+    action: 'Revise as permissões do token na equipe e no projeto configurados.',
+  });
+  if (status === 401) {
     return new DeploymentError('VERCEL_AUTH_FAILED', 'A autenticação com a Vercel falhou.', {
-      statusCode: 502, stage: 'provisioning_storefront', unitId,
+      statusCode: 502, stage: 'provisioning_storefront', unitId, httpStatus: status,
       action: 'Revise o token e o acesso ao projeto compartilhado.',
     });
   }
-  if (status === 409) {
+  if (status === 409 || ['domain_already_in_use', 'domain_taken', 'domain_already_in_use_by_project'].includes(error.response?.data?.error?.code)) {
     return new DeploymentError('VERCEL_DOMAIN_CONFLICT', 'O domínio já está associado a outro projeto.', {
-      statusCode: 409, stage: 'provisioning_storefront', unitId,
+      statusCode: 409, stage: 'provisioning_storefront', unitId, httpStatus: status,
       action: 'Revise o domínio na Vercel antes de repetir.',
     });
   }
@@ -95,7 +99,88 @@ async function assertProjectBinding(target, unitId) {
   return project;
 }
 
+const STANDARD_PROTECTION = 'prod_deployment_urls_and_all_previews';
+
+export async function ensureProductionAccess(target, environment, unitId) {
+  if (environment !== 'production') return { managed: false };
+  try {
+    let project = await assertProjectBinding(target, unitId);
+    const previous = project.ssoProtection?.deploymentType || null;
+    if (previous !== STANDARD_PROTECTION) {
+      await withRetry(() => client(target).patch(`/v9/projects/${encodeURIComponent(target.projectId)}`, {
+        ssoProtection: { deploymentType: STANDARD_PROTECTION },
+      }));
+      project = await assertProjectBinding(target, unitId);
+    }
+    if (project.ssoProtection?.deploymentType !== STANDARD_PROTECTION) {
+      throw new DeploymentError('VERCEL_PROTECTION_NOT_CONFIGURED', 'A Vercel não confirmou a política de produção pública.', {
+        stage: 'provisioning_storefront', unitId, retryable: true,
+      });
+    }
+    return { managed: true, previous, deploymentType: STANDARD_PROTECTION };
+  } catch (error) { throw mapVercelError(error, unitId); }
+}
+
+async function getProjectDomain(target, domain) {
+  try { return (await client(target).get(`/v9/projects/${encodeURIComponent(target.projectId)}/domains/${encodeURIComponent(domain)}`)).data; }
+  catch (error) { if (error.response?.status === 404) return null; throw error; }
+}
+
+export async function ensureProjectDomain(target, domain, unitId) {
+  try {
+    await assertProjectBinding(target, unitId);
+    const alias = await withRetry(() => getAlias(target, domain));
+    if (alias) assertProject(alias, target, unitId);
+    let registered = await withRetry(() => getProjectDomain(target, domain));
+    if (!registered) {
+      await withRetry(async () => {
+        try { await client(target).post(`/v10/projects/${encodeURIComponent(target.projectId)}/domains`, { name: domain }); }
+        catch (error) {
+          // Timeout/concurrent create can have committed. Re-read before retrying.
+          if ([401, 403].includes(error.response?.status)) throw error;
+          if (!await getProjectDomain(target, domain)) throw error;
+        }
+      });
+      registered = await withRetry(() => getProjectDomain(target, domain));
+    }
+    assertProject(registered, target, unitId);
+    if (!registered || registered.name !== domain || registered.projectId !== target.projectId) {
+      throw new DeploymentError('VERCEL_DOMAIN_NOT_READY', 'O cadastro do domínio no projeto ainda não foi confirmado.', {
+        stage: 'provisioning_storefront', unitId, retryable: true,
+      });
+    }
+    const path = `/v9/projects/${encodeURIComponent(target.projectId)}/domains/${encodeURIComponent(domain)}`;
+    if (registered.gitBranch || registered.customEnvironmentId || registered.redirect) {
+      await withRetry(() => client(target).patch(path, { gitBranch: null, customEnvironmentId: null, redirect: null }));
+      registered = await withRetry(() => getProjectDomain(target, domain));
+    }
+    let verificationHttpStatus = null;
+    if (registered?.verified === false) {
+      try { await withRetry(() => client(target).post(`${path}/verify`)); }
+      catch (error) {
+        // Verification challenges may remain pending; permissions and outages retain their own diagnosis.
+        if (error.response?.status !== 400) throw error;
+        verificationHttpStatus = 400;
+      }
+      registered = await withRetry(() => getProjectDomain(target, domain));
+    }
+    if (registered?.verified !== true) {
+      throw new DeploymentError('VERCEL_DOMAIN_UNVERIFIED', 'A Vercel ainda não verificou o domínio deste projeto.', {
+        stage: 'provisioning_storefront', unitId, retryable: true, httpStatus: verificationHttpStatus,
+        action: 'Aguarde a verificação; se persistir, confira propriedade e DNS do domínio.',
+      });
+    }
+    if (registered.projectId !== target.projectId || registered.gitBranch || registered.customEnvironmentId || registered.redirect) {
+      throw new DeploymentError('VERCEL_DOMAIN_CONFIGURATION_INVALID', 'O domínio não está associado diretamente a Production.', {
+        stage: 'provisioning_storefront', unitId,
+      });
+    }
+    return { domain, projectId: registered.projectId, verified: true, environment: 'production' };
+  } catch (error) { throw mapVercelError(error, unitId); }
+}
+
 export async function validatedMainDeployment(target, unitId) {
+  try {
   await assertProjectBinding(target, unitId);
   const githubCommitSha = await currentMainSha(target, unitId);
   const response = await withRetry(() => client(target).get('/v7/deployments', {
@@ -115,6 +200,7 @@ export async function validatedMainDeployment(target, unitId) {
     throw releaseNotReady('Ainda não existe deployment READY correspondente ao SHA atual da main.', unitId);
   }
   return { deployment, githubCommitSha, githubBranch: target.githubBranch, verifiedAt: new Date() };
+  } catch (error) { throw mapVercelError(error, unitId); }
 }
 
 export async function ensureProjectAlias(target, domain, unitId, expectedSha) {
@@ -124,29 +210,30 @@ export async function ensureProjectAlias(target, domain, unitId, expectedSha) {
       throw releaseNotReady('A branch main mudou durante a ativação; a nova release precisa ficar READY.', unitId);
     }
     const { deployment } = release;
+    await ensureProjectDomain(target, domain, unitId);
     const existing = await withRetry(() => getAlias(target, domain));
     if (existing) {
       assertProject(existing, target, unitId);
       if (existing.deploymentId === deployment.uid) return { alias: existing, ...release };
     }
-    const assigned = (await withRetry(() => client(target).post(
-      `/v2/deployments/${encodeURIComponent(deployment.uid)}/aliases`,
-      { alias: domain },
-    ))).data;
+    await withRetry(async () => {
+      try { await client(target).post(`/v2/deployments/${encodeURIComponent(deployment.uid)}/aliases`, { alias: domain }); }
+      catch (error) {
+        if ([401, 403].includes(error.response?.status)) throw error;
+        const found = await getAlias(target, domain);
+        assertProject(found, target, unitId);
+        if (found?.deploymentId !== deployment.uid) throw error;
+      }
+    });
     const reconciled = await withRetry(() => getAlias(target, domain));
-    return { alias: assertProject(reconciled || assigned, target, unitId), ...release };
-  } catch (error) {
-    if (error.response?.status === 409) {
-      try {
-        const release = await validatedMainDeployment(target, unitId);
-        if (expectedSha && release.githubCommitSha !== expectedSha) throw releaseNotReady('A branch main mudou durante a ativação.', unitId);
-        const { deployment } = release;
-        const reconciled = await getAlias(target, domain);
-        if (reconciled && reconciled.deploymentId === deployment.uid) {
-          return { alias: assertProject(reconciled, target, unitId), ...release };
-        }
-      } catch { /* mapped below */ }
+    assertProject(reconciled, target, unitId);
+    if (!reconciled || reconciled.deploymentId !== deployment.uid || reconciled.projectId !== target.projectId) {
+      throw new DeploymentError('VERCEL_ALIAS_NOT_READY', 'O alias ainda não aponta para a release esperada.', {
+        stage: 'provisioning_storefront', unitId, retryable: true,
+      });
     }
+    return { alias: reconciled, ...release };
+  } catch (error) {
     throw mapVercelError(error, unitId);
   }
 }
@@ -191,6 +278,15 @@ export async function validateStorefrontIdentity(storefrontTarget, domain, tenan
       if (error instanceof DeploymentError) throw error;
       lastError = error;
       const status = Number(error.response?.status || 0);
+      let vercelLogin = false;
+      try { const redirect = new URL(String(error.response?.headers?.location || '')); vercelLogin = redirect.hostname === 'vercel.com' && /^\/(sso-api|login)(\/|$)/.test(redirect.pathname); } catch { /* Not a login redirect. */ }
+      if (vercelLogin || status === 401 || status === 403) {
+        throw new DeploymentError(vercelLogin ? 'STOREFRONT_AUTHENTICATION_REQUIRED' : 'STOREFRONT_ACCESS_BLOCKED',
+          vercelLogin ? 'A loja está exigindo login da Vercel.' : 'O acesso público à loja foi bloqueado.', {
+            stage: 'validating_storefront', unitId, httpStatus: status,
+            action: vercelLogin ? 'Confira a política de Production e o cadastro do domínio.' : 'Confira firewall, restrições de IP e proteção adicional.',
+          });
+      }
       if (status && status < 500 && status !== 404 && status !== 429) break;
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }

@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError, publicError } from './errors.js';
 import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
-import { buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
+import { activatedTenantCanResume, buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
 import { buildStorefrontDomain, selectStorefrontDomain } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
@@ -64,7 +64,7 @@ async function trackedStep(deploymentId, unitId, step, operation, { idempotencyK
   } catch (error) {
     const exposed = publicError(error, { deploymentId, unitId });
     await prisma.clientDeploymentStep.update({ where: { id: record.id }, data: { status: 'failed', errorCode: exposed.code, errorMessage: exposed.message, finishedAt: new Date() } });
-    await event(deploymentId, 'step_failed', { unitId, metadata: { step, attempt, code: exposed.code, message: exposed.message, retryable: exposed.retryable, action: exposed.action } });
+    await event(deploymentId, 'step_failed', { unitId, metadata: { step, attempt, code: exposed.code, message: exposed.message, retryable: exposed.retryable, action: exposed.action, httpStatus: exposed.httpStatus, stage: exposed.stage } });
     throw error;
   }
 }
@@ -436,12 +436,56 @@ async function monitorHub(deployment, units, { force = false } = {}) {
   return waiting;
 }
 
+async function resumedUnitStatus(deployment, unit) {
+  if (!unit.unicommerceTenantId) return resumableUnitStatus(unit);
+  const targets = catalogTargets(deployment.environment);
+  const tenant = await commerce.getTenant(targets.unicommerce, unit.unicommerceTenantId, unit.id);
+  const webhook = unit.orderWebhookUrlEncrypted ? decryptSecret(unit.orderWebhookUrlEncrypted) : null;
+  const required = buildTenantErpConfig(targets.hub, unit.hubSellerUnitId, {}, webhook);
+  if (String(tenant.id) !== String(unit.unicommerceTenantId) || tenant.deploymentId !== deployment.id
+      || Number(tenant.hubSellerId) !== Number(deployment.hubSellerId)
+      || Number(tenant.hubSellerUnitId) !== Number(unit.hubSellerUnitId)
+      || (unit.storefrontDomain && tenant.storefrontDomain && unit.storefrontDomain !== tenant.storefrontDomain)) {
+    throw new DeploymentError('RECONCILIATION_REQUIRED', 'O tenant existente não corresponde aos vínculos desta implantação.', {
+      statusCode: 409, stage: 'validating_unicommerce', unitId: unit.id,
+      action: 'Confira a identidade, unidade do Hub e domínio antes de retomar.',
+    });
+  }
+  if (tenant.status !== 'active') {
+    if (tenant.id !== unit.unicommerceTenantId || tenant.deploymentId !== deployment.id
+        || Number(tenant.hubSellerUnitId) !== Number(unit.hubSellerUnitId)
+        || !tenantConfigurationIsValid(tenant, required, unit.hubSellerUnitId)) return resumableUnitStatus(unit);
+    const branding = await prisma.clientDeploymentStep.findFirst({ where: { deploymentId: deployment.id, unitId: unit.id, step: 'unicommerce_configure_branding' }, orderBy: { startedAt: 'desc' } });
+    if (branding?.status === 'completed') {
+      const catalog = await prisma.clientDeploymentStep.findFirst({ where: { deploymentId: deployment.id, unitId: unit.id, step: 'unicommerce_validate_sellable_catalog' }, orderBy: { startedAt: 'desc' } });
+      if (catalog?.status === 'completed' && Number(unit.coveragePercent) >= 95) return 'awaiting_activation';
+      return 'unicommerce_ready';
+    }
+    return resumableUnitStatus(unit);
+  }
+  const evidence = await prisma.clientDeploymentStep.findFirst({ where: {
+    deploymentId: deployment.id, unitId: unit.id, step: 'unicommerce_activate_tenant', status: 'completed',
+  } });
+  if (!activatedTenantCanResume(deployment, unit, tenant, required, Boolean(evidence))) {
+    throw new DeploymentError('RECONCILIATION_REQUIRED', 'O tenant ativo não corresponde à ativação registrada nesta implantação.', {
+      statusCode: 409, stage: 'validating_unicommerce', unitId: unit.id,
+      action: 'Confira os vínculos do tenant, unidade, domínio e a ativação anterior.',
+    });
+  }
+  await eventIfChanged(deployment.id, 'active_tenant_reconciled', unit.id, { tenantId: tenant.id, domain: unit.storefrontDomain });
+  return 'active';
+}
+
 async function provisionCommerce(deployment, units, assets) {
   const targets = catalogTargets(deployment.environment);
   const apiKey = decryptSecret((await prisma.clientDeployment.findUnique({ where: { id: deployment.id } })).sellerApiKeyEncrypted);
   const branding = Object.fromEntries(assets.map((asset) => [asset.type, asset.publicUrl]));
   for (const unit of units.filter((item) => item.status === 'catalog_active')) {
     try {
+      if (unit.unicommerceTenantId && await resumedUnitStatus(deployment, unit) === 'active') {
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'active', lastErrorCode: null, lastErrorMessage: null, retryable: false } });
+        continue;
+      }
       let tenant = unit.unicommerceTenantId ? await commerce.getTenant(targets.unicommerce, unit.unicommerceTenantId, unit.id) : await commerce.findTenantByHubUnit(targets.unicommerce, unit.hubSellerUnitId);
       const orderWebhookUrl = unit.orderWebhookUrlEncrypted ? decryptSecret(unit.orderWebhookUrlEncrypted) : null;
       if (!orderWebhookUrl) throw new DeploymentError('ORDER_WEBHOOK_URL_REQUIRED', 'A URL de recebimento de pedidos não está configurada para a unidade.', { statusCode: 409, stage: 'provisioning_unicommerce', unitId: unit.id, action: 'Informe uma URL HTTPS válida no cadastro da implantação.' });
@@ -591,7 +635,7 @@ async function processHubCatalogUnit(deployment, unit) {
   }
 
   const percentage = Number(current.coveragePercent || job.progressPercent || 0);
-  if (meetsCoverageGate(percentage) && !['banco_unico_ready', 'awaiting_activation', 'active'].includes(current.status)) {
+  if (meetsCoverageGate(percentage) && !current.storefrontDomain && !['banco_unico_ready', 'awaiting_activation', 'active'].includes(current.status)) {
     if (deployment.flowMode === 'hub_banco_only') {
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'banco_unico_ready' } });
       await event(deployment.id, 'unit_hub_banco_ready', { unitId: unit.id, fromStatus: current.status, toStatus: 'banco_unico_ready', metadata: { sourceType: 'hub_catalog', coveragePercentage: percentage, threshold: 95, jobId: job.id } });
@@ -698,12 +742,16 @@ export async function processDeployment(id) {
     deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } }); const bancoWaiting = await importBancoUnico(deployment, deployment.units);
     if (bancoWaiting) { await prisma.clientDeployment.update({ where: { id }, data: { status: 'importing_banco_unico', currentStage: 'importing_banco_unico' } }); return; }
     const units = await prisma.clientDeploymentUnit.findMany({ where: { deploymentId: id } }); const failed = units.filter((unit) => ['failed', 'reconciliation_required'].includes(unit.status));
-    const status = failed.length ? (failed.length === units.length ? 'failed' : 'partially_failed') : units.every((unit) => unit.status === 'awaiting_activation') ? 'awaiting_activation' : 'queued';
-    await prisma.clientDeployment.update({ where: { id }, data: { status, currentStage: status, workerId: null, workerHeartbeatAt: null } });
-    if (status === 'awaiting_activation') {
-      await activateTenants(id, 'Sistema (ativação automática)', `auto:${id}`);
+    const status = failed.length ? (failed.length === units.length ? 'failed' : 'partially_failed') : units.every((unit) => ['awaiting_activation', 'active'].includes(unit.status)) ? 'awaiting_activation' : 'queued';
+    const firstFailure = failed[0];
+    await prisma.clientDeployment.update({ where: { id }, data: { status, currentStage: status,
+      ...(firstFailure ? { lastErrorCode: firstFailure.lastErrorCode, lastErrorMessage: firstFailure.lastErrorMessage, retryable: firstFailure.retryable } : {}),
+    } });
+    if (status === 'awaiting_activation' || units.some((unit) => ['awaiting_activation', 'active'].includes(unit.status) && unit.storefrontStatus !== 'ready')) {
+      await activateTenants(id, 'Sistema (ativação automática)', `auto:${id}`, { readyUnitsOnly: true });
     }
   } catch (error) {
+    if (error.storefrontHandled) return;
     const exposed = publicError(error, { deploymentId: id });
     const activated = await prisma.clientDeploymentUnit.count({ where: { deploymentId: id, status: { in: ['active', 'reconciliation_required'] } } });
     const failureStatus = activated ? 'reconciliation_required'
@@ -716,15 +764,22 @@ export async function processDeployment(id) {
 export async function retryDeployment(id, actor) {
   const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
-  for (const unit of deployment.units.filter((item) => ['failed', 'reconciliation_required'].includes(item.status))) {
-    const resume = resumableUnitStatus(unit);
+  if (!['failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required'].includes(deployment.status)) return getDeployment(id);
+  for (const unit of deployment.units.filter((item) => ['failed', 'reconciliation_required'].includes(item.status) || item.lastErrorCode)) {
+    const resume = await resumedUnitStatus(deployment, unit);
     await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } });
+    await event(id, 'unit_retry_requested', { unitId: unit.id, fromStatus: unit.status, toStatus: resume, createdBy: actor, metadata: { resumedAt: resume } });
   }
   return startDeployment(id, actor);
 }
 export async function retryUnit(deploymentId, unitId, actor) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } }); if (!unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
-  const resume = resumableUnitStatus(unit);
+  const deployment = await prisma.clientDeployment.findUnique({ where: { id: deploymentId } });
+  if (!['failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required'].includes(deployment.status)
+      || (!['failed', 'reconciliation_required'].includes(unit.status) && !unit.lastErrorCode)) {
+    throw new DeploymentError('RETRY_NOT_AVAILABLE', 'A unidade não está parada em uma falha recuperável pelo operador.', { statusCode: 409, unitId });
+  }
+  const resume = await resumedUnitStatus(deployment, unit);
   await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } }); await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'queued', currentStage: 'queued', startedAt: new Date(), lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   await event(deploymentId, 'unit_retry_requested', { unitId, fromStatus: unit.status, toStatus: resume, createdBy: actor }); return getDeployment(deploymentId);
 }
@@ -732,14 +787,33 @@ export async function retryUnit(deploymentId, unitId, actor) {
 async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
   const target = catalogTargets(deployment.environment).storefront;
   if (!target.enabled) throw new DeploymentError('STOREFRONT_PROVISIONING_DISABLED', 'A automação do storefront está desativada.', {
-    statusCode: 503, stage: 'configuration', retryable: true,
+    statusCode: 503, stage: 'configuration',
     action: 'Ative STOREFRONT_PROVISIONING_ENABLED para liberar a implantação.',
   });
   let firstError = null;
   const domains = [];
   for (const unit of deployment.units) {
     let activated = unit.status === 'active';
+    if (activated && unit.storefrontStatus === 'ready') {
+      domains.push({ unitId: unit.id, tenantId: unit.unicommerceTenantId, domain: unit.storefrontDomain, status: 'ready' });
+      continue;
+    }
+    const attempt = await prisma.clientDeploymentStep.create({ data: {
+      deploymentId: deployment.id, unitId: unit.id, step: 'storefront_publish_attempt', status: 'running',
+      attempt: await prisma.clientDeploymentStep.count({ where: { deploymentId: deployment.id, unitId: unit.id, step: 'storefront_publish_attempt' } }) + 1,
+    } });
     try {
+      // Recover a remote activation even after a worker restart before local persistence.
+      if (unit.unicommerceTenantId) {
+        const resumed = await resumedUnitStatus(deployment, unit);
+        if (!['awaiting_activation', 'active'].includes(resumed)) {
+          throw new DeploymentError('UNICOMMERCE_CONFIGURATION_CHANGED', 'A configuração do tenant precisa ser validada novamente antes da publicação.', {
+            statusCode: 409, stage: 'validating_unicommerce', unitId: unit.id,
+            action: 'Retome a unidade para revisar a preparação do tenant.',
+          });
+        }
+        activated = resumed === 'active';
+      }
       if (!['awaiting_activation', 'active'].includes(unit.status) || !unit.unicommerceTenantId) {
         throw new DeploymentError('STOREFRONT_NOT_READY', 'O tenant precisa estar pronto e inativo antes da publicação do storefront.', {
           statusCode: 409, stage: 'provisioning_storefront', unitId: unit.id,
@@ -785,6 +859,14 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
         vercelGitCommitSha: release.githubCommitSha, storefrontReleaseVerifiedAt: release.verifiedAt,
       } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'assigning_alias' } });
+      await trackedStep(deployment.id, unit.id, 'vercel_register_project_domain',
+        () => vercel.ensureProjectDomain(target.vercel, domain, unit.id), {
+          request: { projectId: target.vercel.projectId, domain }, response: (value) => value,
+        });
+      await trackedStep(deployment.id, unit.id, 'vercel_configure_production_access',
+        () => vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id), {
+          request: { projectId: target.vercel.projectId, environment: deployment.environment }, response: (value) => value,
+        });
       const aliasResult = await trackedStep(deployment.id, unit.id, 'vercel_assign_storefront_alias',
         () => vercel.ensureProjectAlias(target.vercel, domain, unit.id, release.githubCommitSha), {
           idempotencyKey: `${deployment.id}:${unit.id}:vercel-alias:${idempotencyKey}`,
@@ -840,6 +922,7 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
         where: { id: unit.id },
         data: {
           storefrontStatus: 'ready',
+          status: 'active',
           storefrontValidatedAt: new Date(),
           lastErrorCode: null,
           lastErrorMessage: null,
@@ -847,16 +930,19 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
         },
       });
       domains.push({ unitId: unit.id, tenantId: unit.unicommerceTenantId, domain, status: 'ready' });
+      await prisma.clientDeploymentStep.update({ where: { id: attempt.id }, data: { status: 'completed', finishedAt: new Date() } });
       await event(deployment.id, 'storefront_ready', {
         unitId: unit.id, toStatus: 'ready', createdBy: actor,
         metadata: { domain, tenantId: unit.unicommerceTenantId, projectId: target.vercel.projectId },
       });
     } catch (error) {
       const exposed = publicError(error, { deploymentId: deployment.id, unitId: unit.id });
+      error.unitId ||= unit.id;
+      await prisma.clientDeploymentStep.update({ where: { id: attempt.id }, data: { status: 'failed', errorCode: exposed.code, errorMessage: exposed.message, finishedAt: new Date() } });
       await prisma.clientDeploymentUnit.update({
         where: { id: unit.id },
         data: {
-          status: activated ? 'reconciliation_required' : unit.status,
+          status: exposed.retryable ? (activated ? 'active' : unit.status) : activated ? 'reconciliation_required' : unit.status,
           storefrontStatus: activated ? 'reconciliation_required' : 'failed',
           lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable,
         },
@@ -864,43 +950,80 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
       await event(deployment.id, 'storefront_failed', {
         unitId: unit.id, toStatus: 'failed', createdBy: actor, metadata: exposed,
       });
-      firstError ||= error;
+      // A permanent failure must not be hidden by another unit's transient failure.
+      if (!firstError || !exposed.retryable) firstError = error;
     }
   }
   if (firstError) throw firstError;
   return { enabled: true, domains };
 }
 
-export async function activateTenants(id, actor, idempotencyKey) {
+async function completeStorefrontDeployment(deployment, actor, storefront, snapshot = deployment.activationSnapshot || {}) {
+  const incomplete = await prisma.clientDeploymentUnit.findMany({ where: {
+    deploymentId: deployment.id, OR: [{ status: { not: 'active' } }, { storefrontStatus: null }, { storefrontStatus: { not: 'ready' } }],
+  } });
+  if (incomplete.length) {
+    if (!incomplete.every((unit) => ['failed', 'reconciliation_required'].includes(unit.status))) {
+      throw new DeploymentError('STOREFRONT_NOT_READY', 'Ainda existem lojas sem validação pública.', { stage: 'validating_storefront' });
+    }
+    await prisma.clientDeployment.update({ where: { id: deployment.id }, data: {
+      status: 'partially_failed', currentStage: 'partially_failed',
+      lastErrorCode: incomplete[0].lastErrorCode, lastErrorMessage: incomplete[0].lastErrorMessage,
+      retryable: incomplete[0].retryable,
+    } });
+    return;
+  }
+  const completedSnapshot = { ...snapshot, storefront: storefront.domains };
+  await finalizeDeploymentCredentials(deployment);
+  if (deployment.environment === 'production' && deployment.promotedFromDeploymentId) {
+    await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: deployment.promotedFromDeploymentId }, data: { credentialRefEncrypted: null, credentialExpiresAt: null } });
+  }
+  await prisma.clientDeployment.update({ where: { id: deployment.id }, data: {
+    status: 'completed', currentStage: 'completed', activationSnapshot: completedSnapshot,
+    activatedAt: deployment.activatedAt || new Date(), activatedBy: deployment.activatedBy || actor,
+    lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date(),
+  } });
+  await event(deployment.id, 'tenants_activated', { toStatus: 'completed', metadata: completedSnapshot, createdBy: actor });
+}
+
+async function recordStorefrontFailure(deployment, error) {
+  const exposed = publicError(error, { deploymentId: deployment.id });
+  const pending = await prisma.clientDeploymentUnit.findMany({ where: { deploymentId: deployment.id, OR: [{ storefrontStatus: null }, { storefrontStatus: { not: 'ready' } }] } });
+  const attempts = await Promise.all(pending.map((unit) => prisma.clientDeploymentStep.count({ where: {
+    deploymentId: deployment.id, unitId: unit.id, step: 'storefront_publish_attempt',
+    startedAt: { gte: deployment.startedAt || deployment.createdAt },
+  } })));
+  const exhausted = attempts.some((count) => count >= 6); // Initial attempt plus five retries.
+  const permanentFailure = pending.some((unit) => unit.lastErrorCode && !unit.retryable);
+  const status = exposed.retryable && !permanentFailure && !exhausted
+    ? exposed.code === 'STOREFRONT_RELEASE_NOT_READY' ? 'waiting_storefront_release' : 'waiting_storefront'
+    : pending.some((unit) => ['active', 'reconciliation_required'].includes(unit.status)) ? 'reconciliation_required' : 'failed';
+  await prisma.clientDeployment.update({ where: { id: deployment.id }, data: {
+    status, currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code,
+    lastErrorMessage: exposed.message, retryable: exposed.retryable,
+  } });
+  await event(deployment.id, status.startsWith('waiting_') ? 'storefront_retry_scheduled' : 'deployment_failed', {
+    unitId: exposed.unitId, toStatus: status, metadata: { ...exposed, exhausted, attempts: Math.max(0, ...attempts), retryAfterSeconds: status.startsWith('waiting_') ? 30 : null },
+  });
+  error.storefrontHandled = true;
+}
+
+export async function activateTenants(id, actor, idempotencyKey, { readyUnitsOnly = false } = {}) {
   if (!idempotencyKey) throw new DeploymentError('IDEMPOTENCY_KEY_REQUIRED', 'O header Idempotency-Key é obrigatório.', { statusCode: 400 });
   const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
   if (deployment.flowMode === 'hub_banco_only') throw new DeploymentError('FLOW_ACTION_NOT_APPLICABLE', 'Este fluxo termina no Hub e Banco Único e não possui tenants para ativar.', { statusCode: 409, stage: 'activation' });
+  if (readyUnitsOnly) deployment.units = deployment.units.filter((unit) => ['awaiting_activation', 'active'].includes(unit.status));
   if (!deployment.units.every((unit) => ['awaiting_activation', 'active'].includes(unit.status)) || !deployment.assets.every((asset) => asset.status === 'confirmed')) throw new DeploymentError('ACTIVATION_NOT_READY', 'A implantação ainda não cumpre todos os critérios de ativação.', { statusCode: 409, stage: 'activating_tenants' });
   const targets = catalogTargets(deployment.environment);
   const snapshot = { approvedAt: new Date().toISOString(), approvedBy: actor, units: deployment.units.map((unit) => ({ id: unit.id, tenantId: unit.unicommerceTenantId, hubSellerUnitId: String(unit.hubSellerUnitId), bancoUnicoImportJobId: unit.bancoUnicoImportJobId, storefrontDomain: targets.storefront.enabled ? buildStorefrontDomain({ username: deployment.username, unit, prefix: targets.storefront.domainPrefix, suffix: targets.storefront.domainSuffix }) : null })) };
   try {
     await prisma.clientDeployment.update({ where: { id }, data: { currentStage: 'provisioning_storefront', activationSnapshot: snapshot } });
     const storefront = await provisionStorefrontUnits(deployment, actor, idempotencyKey);
-    const completedSnapshot = { ...snapshot, storefront: storefront.domains };
-    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: completedSnapshot, activatedAt: new Date(), activatedBy: actor, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
-    if (deployment.environment === 'staging') {
-      const credentialExpiresAt = new Date(Date.now() + Math.max(1, env.CATALOG_CREDENTIAL_RETENTION_DAYS) * 86400000);
-      await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: id }, data: { credentialExpiresAt } });
-    } else {
-      await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: id }, data: { credentialRefEncrypted: null, credentialExpiresAt: null } });
-      if (deployment.promotedFromDeploymentId) {
-        await prisma.clientDeploymentUnit.updateMany({ where: { deploymentId: deployment.promotedFromDeploymentId }, data: { credentialRefEncrypted: null, credentialExpiresAt: null } });
-      }
-    }
-    await event(id, 'tenants_activated', { toStatus: 'completed', metadata: completedSnapshot, createdBy: actor });
+    await completeStorefrontDeployment(deployment, actor, storefront, snapshot);
     return getDeployment(id);
   } catch (error) {
-    const exposed = publicError(error, { deploymentId: id });
-    const hasActivatedUnit = await prisma.clientDeploymentUnit.count({ where: { deploymentId: id, status: { in: ['active', 'reconciliation_required'] } } });
-    const status = hasActivatedUnit ? 'reconciliation_required'
-      : exposed.code === 'STOREFRONT_RELEASE_NOT_READY' ? 'waiting_storefront_release' : 'awaiting_activation';
-    await prisma.clientDeployment.update({ where: { id }, data: { status, currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
+    await recordStorefrontFailure(deployment, error);
     throw error;
   }
 }
@@ -920,13 +1043,10 @@ export async function provisionStorefronts(id, actor, idempotencyKey) {
   await prisma.clientDeployment.update({ where: { id }, data: { currentStage: 'provisioning_storefront', lastErrorCode: null, lastErrorMessage: null, retryable: false } });
   try {
     const storefront = await provisionStorefrontUnits(deployment, actor, idempotencyKey);
-    const currentSnapshot = deployment.activationSnapshot && typeof deployment.activationSnapshot === 'object' ? deployment.activationSnapshot : {};
-    await prisma.clientDeployment.update({ where: { id }, data: { status: 'completed', currentStage: 'completed', activationSnapshot: { ...currentSnapshot, storefront: storefront.domains }, lastErrorCode: null, lastErrorMessage: null, retryable: false, finishedAt: new Date() } });
-    await event(id, 'storefronts_provisioned', { toStatus: 'completed', createdBy: actor, metadata: { domains: storefront.domains } });
+    await completeStorefrontDeployment(deployment, actor, storefront);
     return getDeployment(id);
   } catch (error) {
-    const exposed = publicError(error, { deploymentId: id });
-    await prisma.clientDeployment.update({ where: { id }, data: { currentStage: exposed.stage || 'provisioning_storefront', lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable } });
+    await recordStorefrontFailure(deployment, error);
     throw error;
   }
 }
@@ -996,11 +1116,10 @@ export async function reconcileStorefrontAliases() {
     const target = catalogTargets(deployment.environment).storefront;
     if (!target.enabled) continue;
     const release = await vercel.validatedMainDeployment(target.vercel, unit.id);
-    if (unit.vercelGitCommitSha === release.githubCommitSha && unit.vercelDeploymentId === release.deployment.uid) {
-      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontReleaseVerifiedAt: release.verifiedAt } });
-      continue;
-    }
+    await vercel.ensureProjectDomain(target.vercel, unit.storefrontDomain, unit.id);
+    await vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id);
     const reconciled = await vercel.ensureProjectAlias(target.vercel, unit.storefrontDomain, unit.id, release.githubCommitSha);
+    await vercel.validateStorefrontIdentity(target, unit.storefrontDomain, unit.unicommerceTenantId, unit.id);
     await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
       vercelProjectId: target.vercel.projectId, vercelDeploymentId: reconciled.deployment.uid,
       vercelGitBranch: reconciled.githubBranch, vercelGitCommitSha: reconciled.githubCommitSha,

@@ -21,6 +21,7 @@ export function publicError(error, context = {}) {
     deploymentId: context.deploymentId || null,
     unitId: error.unitId || context.unitId || null,
     retryable: known ? error.retryable : false,
+    httpStatus: known ? error.httpStatus : null,
     action: error.action || (known ? null : 'Contate o suporte técnico.'),
   };
 }

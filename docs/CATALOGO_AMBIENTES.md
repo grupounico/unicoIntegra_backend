@@ -64,10 +64,100 @@ código da unidade, por exemplo `whatsapp-<username>-loja-02.vercel.app`.
 `VERCEL_PROJECT_ID` podem ser compartilhados entre staging e production; para
 separá-los, use as variantes `VERCEL_STAGING_*` e `VERCEL_PRODUCTION_*`.
 
-Se a release ainda não estiver alinhada, a implantação permanece em
-`waiting_storefront_release` com o tenant inativo. O reconciliador apenas move
-aliases concluídos quando uma nova release validada da `main` fica pronta; ele
-não cria deploys, commits, merges ou pushes.
+Se a release ainda não estiver alinhada, a implantação aguarda em
+`waiting_storefront_release`, sem ativar tenants novos. Tenants previamente
+ativados pela mesma implantação permanecem ativos. O reconciliador verifica
+domínio, proteção e alias mesmo quando o SHA não mudou; ele não cria deploys,
+commits, merges ou pushes.
+
+### Publicação automática e permissões
+
+O fluxo valida equipe/projeto e vínculo Git antes de qualquer escrita na Vercel:
+
+1. Confirma a release `READY` correspondente ao SHA atual da `main`.
+2. Consulta e, se necessário, cadastra o domínio em **Project Domains**.
+   Remove associação de preview/redirecionamento nesse domínio, confirma
+   Production e reconsulta a verificação. Um alias legado não substitui esse cadastro.
+3. Apenas em produção, configura **Standard Protection** via
+   `ssoProtection.deploymentType = prod_deployment_urls_and_all_previews` e
+   confirma por leitura. **Todos os domínios de Production desse projeto ficam
+   públicos; previews e URLs individuais de deployments continuam protegidos.**
+4. Associa o alias à release validada, configura o domínio no tenant e ativa-o
+   somente se ainda estiver inativo e apto para ativação.
+5. Acessa `/api/storefront/identity` e `/api/catalog/products` sem cookies,
+   autenticação ou bypass. Exige HTTP 200, tenant e domínio esperados, status
+   ativo, três banners desktop/mobile distintos e ao menos 20 produtos com
+   preço e estoque positivos antes de concluir.
+
+O token Vercel precisa acessar a equipe selecionada e ter permissão para ler
+projeto/deployments/aliases, cadastrar/atualizar/verificar Project Domains,
+associar aliases e atualizar a configuração de autenticação do projeto.
+Um token somente de leitura não basta. O token GitHub precisa ler a revisão
+atual do repositório (inclusive acesso ao repositório quando privado).
+Nenhum desses tokens deve ser enviado pelo frontend ou gravado em eventos.
+
+Em staging, a automação **não altera a autenticação**. Use projeto/equipe de
+staging separados se precisar preservar uma política diferente: compartilhar
+um projeto com produção também compartilha suas políticas. Firewall,
+restrições de IP, senhas e demais proteções não são desativados automaticamente.
+Domínios de outro projeto geram conflito; não há transferência automática.
+Em respostas ambíguas ou concorrência, o cadastro remoto é reconsultado antes
+de repetir a escrita.
+
+Contratos: [Project Domains](https://vercel.com/docs/rest-api/projects/add-a-domain-to-a-project)
+e [Vercel Authentication](https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication).
+
+### Retomar após a última etapa confirmada
+
+No acompanhamento, use **Retomar implantação** no cabeçalho/alerta ou
+**Retomar unidade** no cartão da unidade. Os botões aparecem em falha,
+falha parcial, timeout ou reconciliação necessária, inclusive quando
+`retryable=false`: esse campo controla a repetição automática, não impede
+uma retomada manual depois da correção da causa.
+
+Os endpoints permanecem `POST /api/v1/deployments/:deploymentId/retry` e
+`POST /api/v1/deployments/:deploymentId/units/:unitId/retry`.
+Não é necessário criar outra implantação nem editar o banco.
+
+A retomada consulta o estado real do tenant e confere identidade, implantação,
+unidade/vendedor do Hub, configuração e domínio. Um tenant ativo só é
+reaproveitado com registro de ativação concluída pela própria implantação.
+Nesse caso, retoma a publicação da loja, sem recriar tenant, reimportar produtos
+ou ativá-lo novamente. Para tenants novos continua valendo a preparação
+inativa. Cada unidade retoma sua pendência; unidades já prontas são preservadas.
+
+Falhas transitórias da publicação ficam em `waiting_storefront`. O worker
+agenda até **cinco novas tentativas**, com intervalo mínimo de **30 segundos**
+(a primeira execução não conta como nova tentativa). O orçamento usa etapas
+persistidas desde `startedAt` da tentativa atual, sobrevivendo ao reinício do
+worker. Ao esgotar, preserva recursos e erro para retomada manual. Um clique
+de retomada inicia um novo orçamento; não apaga o histórico.
+
+Diagnóstico no alerta e na timeline:
+
+| Código | Ação de suporte |
+| --- | --- |
+| `VERCEL_DOMAIN_CONFLICT` | Conferir o proprietário/projeto; não transferir automaticamente. |
+| `VERCEL_PERMISSION_DENIED` / `VERCEL_AUTH_FAILED` | Corrigir acesso/permissões do token da equipe e tentar novamente. |
+| `VERCEL_DOMAIN_UNVERIFIED` | Conferir propriedade, verificação e DNS. |
+| `STOREFRONT_AUTHENTICATION_REQUIRED` | Conferir cadastro em Production e política de autenticação. |
+| `STOREFRONT_ACCESS_BLOCKED` | Conferir firewall, IP e outras proteções; não há bypass. |
+| `RECONCILIATION_REQUIRED` | Conferir vínculos e evidência de ativação; não desativar/recriar o tenant. |
+
+Os metadados seguros preservam etapa e HTTP quando disponíveis, sem corpo
+da resposta remota nem credenciais. O painel usa o erro da unidade quando o
+erro geral está vazio. O novo status é textual e não exige migration.
+
+### Validação local isolada
+
+`npm test` cobre domínios, aliases, permissões, proteção e identidade pública.
+Com PostgreSQL descartável em `127.0.0.1:55432/unico_integra_test`, execute
+`node test/catalogDeployment.e2e.mjs` e
+`CATALOG_E2E_PUBLICATION_RECOVERY=1 node test/catalogDeployment.e2e.mjs`.
+O segundo cenário reproduz a falha de Franca, preservação de IDs/produtos,
+unidades em estados diferentes, worker reiniciado e limite de tentativas.
+**O teste E2E limpa suas tabelas: nunca aponte `CATALOG_E2E_DATABASE_URL` para
+produção ou um banco compartilhado.**
 
 `POST /api/v1/deployments/:deploymentId/promote` promove staging para production
 de forma idempotente. A rota fica bloqueada até

@@ -16,10 +16,11 @@ test('associa o alias ao ultimo deployment de producao pronto', async (t) => {
   axios.create = (defaults) => ({
     async get(path, config) {
       calls.push({ method: 'GET', path, config, defaults });
+      if (path.startsWith('/v9/projects/project-1/domains/')) return { data: { name: 'whatsapp-rede.vercel.app', projectId: 'project-1', verified: true } };
       if (path === '/v9/projects/project-1') return { data: { link: { type: 'github', org: 'grupounico', repo: 'unicommerce', productionBranch: 'main' } } };
       if (path === '/v7/deployments') return { data: { deployments: [{ uid: 'dpl-ready', projectId: 'project-1', state: 'READY', meta: { githubCommitSha: SHA, githubCommitRef: 'main', githubCommitRepo: 'unicommerce', githubCommitOrg: 'grupounico' } }] } };
       if (path.startsWith('/v4/aliases/')) {
-        if (calls.filter((item) => item.path.startsWith('/v4/aliases/')).length === 1) {
+        if (calls.filter((item) => item.path.startsWith('/v4/aliases/')).length <= 2) {
           const error = new Error('not found'); error.response = { status: 404 }; throw error;
         }
         return { data: { alias: 'whatsapp-rede.vercel.app', deploymentId: 'dpl-ready', projectId: 'project-1' } };

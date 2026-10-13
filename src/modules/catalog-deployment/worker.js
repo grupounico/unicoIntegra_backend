@@ -7,14 +7,15 @@ import { processDeployment, processHubCatalogBackground, purgeExpiredDeploymentC
 const workerId = `${os.hostname()}:${process.pid}:${crypto.randomUUID()}`;
 let timer = null; let running = false;
 
-async function tick() {
+export async function runCatalogDeploymentWorkerOnce() {
   if (running) return; running = true;
   try {
     const staleBefore = new Date(Date.now() - env.DEPLOYMENT_LEASE_MS);
     const releasePollBefore = new Date(Date.now() - Math.max(5000, env.STOREFRONT_RELEASE_POLL_INTERVAL_MS));
     const candidate = await prisma.clientDeployment.findFirst({ where: { AND: [
-      { status: { in: ['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico', 'awaiting_activation', 'waiting_storefront_release'] } },
+      { status: { in: ['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico', 'awaiting_activation', 'waiting_storefront_release', 'waiting_storefront'] } },
       { OR: [{ status: { not: 'waiting_storefront_release' } }, { status: 'waiting_storefront_release', updatedAt: { lt: releasePollBefore } }] },
+      { OR: [{ status: { not: 'waiting_storefront' } }, { status: 'waiting_storefront', updatedAt: { lt: new Date(Date.now() - 30000) } }] },
       { OR: [{ workerHeartbeatAt: null }, { workerHeartbeatAt: { lt: staleBefore } }] },
     ] }, orderBy: { updatedAt: 'asc' } });
     if (!candidate) {
@@ -44,5 +45,10 @@ async function tick() {
 
 export function initializeCatalogDeploymentWorker() {
   if (!env.DEPLOYMENT_WORKER_ENABLED || timer) return;
-  timer = setInterval(tick, Math.max(1000, env.DEPLOYMENT_WORKER_INTERVAL_MS)); timer.unref(); tick();
+  timer = setInterval(runCatalogDeploymentWorkerOnce, Math.max(1000, env.DEPLOYMENT_WORKER_INTERVAL_MS)); timer.unref(); runCatalogDeploymentWorkerOnce();
+}
+
+export function stopCatalogDeploymentWorker() {
+  if (timer) clearInterval(timer);
+  timer = null;
 }
