@@ -1120,7 +1120,8 @@ export async function reconcileStorefrontAliases() {
     await vercel.ensureProjectDomain(target.vercel, unit.storefrontDomain, unit.id);
     await vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id);
     const reconciled = await vercel.ensureProjectAlias(target.vercel, unit.storefrontDomain, unit.id, release.githubCommitSha);
-    await vercel.validateStorefrontIdentity(target, unit.storefrontDomain, unit.unicommerceTenantId, unit.id);
+    // Periodic reconciliation only checks Vercel routing. A public catalog probe
+    // can fan out into expensive live stock queries; keep it in initial publication.
     await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
       vercelProjectId: target.vercel.projectId, vercelDeploymentId: reconciled.deployment.uid,
       vercelGitBranch: reconciled.githubBranch, vercelGitCommitSha: reconciled.githubCommitSha,
