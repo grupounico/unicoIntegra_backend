@@ -534,6 +534,57 @@ const MANAGED_AI_PROVIDER_DEFINITIONS = {
       );
     },
   },
+  // IA de venda criada pelo catalogo (modelo Minas Mais): busca nativa no grupo de
+  // produtos importado, cartao com botao Comprar e carrinho CRM dentro da conversa.
+  venda: {
+    provider: 'venda',
+    displayName: 'IA - Venda (Catálogo)',
+    templateName: 'IA - Venda Catálogo',
+    fallbackVersion: 1,
+    templatePaths: {
+      assistant: 'ia/venda/venda_ia_config.json',
+      preProcess: 'ia/venda/venda_pre_processamento.json',
+      // ponytail: coluna obrigatoria no pacote; nao e instalada porque a busca e nativa do catalogo.
+      buscaProdutos: 'ia/alpha2/alpha2_consulta_produtos.json',
+      downloadImagem: 'ia/venda/venda_envia_produto.json',
+      ura: 'ia/venda/venda_ura.json',
+      uraAb: 'ia/alpha2/alpha2_ura_ab.json',
+    },
+    installOrder: ['preProcess', 'downloadImagem', 'ura', 'uraAb'],
+    updateOrder: ['preProcess', 'downloadImagem'],
+    createConfigSnapshot(input = {}) {
+      return {
+        assistantDisplayName: input.name ?? '',
+        nome_cliente: input.nome_cliente ?? '',
+        signatureName: input.signatureName ?? '',
+        productsGroupId: Number(input.productsGroupId) || 0,
+      };
+    },
+    buildTemplateVariables({ instance, assistantId, config = {}, ids = {} }) {
+      return {
+        id: assistantId,
+        ia_id: assistantId,
+        assistant_name: config.assistantDisplayName || `IA de Venda - ${config.nome_cliente}`,
+        signaturename: config.signatureName || config.nome_cliente || '',
+        nome_cliente: config.nome_cliente || '',
+        url_cliente: instance,
+        products_group_id: config.productsGroupId || 0,
+        preAutomationId: ids.preProcessId || 0,
+        envia_produtos_automation_id: ids.downloadImagemId || 0,
+        ura_ia_id: ids.uraIaId || '',
+      };
+    },
+    canUpdateInstallation(record = {}) {
+      return Boolean(
+        record.assistantId &&
+          record.preProcessId &&
+          record.downloadImagemId &&
+          record.uraIaId &&
+          record.configSnapshot?.nome_cliente &&
+          record.configSnapshot?.productsGroupId,
+      );
+    },
+  },
 };
 
 export const MANAGED_AI_PROVIDERS = Object.keys(MANAGED_AI_PROVIDER_DEFINITIONS);

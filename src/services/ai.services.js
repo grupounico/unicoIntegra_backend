@@ -7,6 +7,7 @@ import {
   vannonFunctions,
   vannon2Functions,
   vectorFunctions,
+  vendaFunctions,
 } from './aiFunctions.js';
 import {
   buildManagedAiTemplateVariables,
@@ -49,6 +50,7 @@ const MANAGED_PROVIDER_INSTALLERS = {
   vannon: vannonFunctions,
   vannon2: vannon2Functions,
   vetor: vectorFunctions,
+  venda: vendaFunctions,
 };
 
 const COMPONENT_ID_FIELD_BY_KEY = {
@@ -408,6 +410,15 @@ export async function createAiTrier({
       porta_cliente,
       apiKey,
     },
+  });
+}
+
+// Sem username/password/code2fa: authenticateInstance usa a conta de servico (INSTANCE_SERVICE_*).
+export async function createAiVenda({ instance, username, password, code2fa, name, nome_cliente, signatureName, productsGroupId }) {
+  return createManagedIntegratedAi({
+    provider: 'venda',
+    auth: { instance, username, password, code2fa },
+    configInput: { name, nome_cliente, signatureName, productsGroupId },
   });
 }
 
