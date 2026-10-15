@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "source": {
+    "origin": "https://unicodev.atenderbem.com",
+    "capturedAt": "2026-10-15T03:35:51.534Z",
+    "assistants": [
+      1
+    ],
+    "flows": [
+      13,
+      14
+    ]
+  },
+  "assistants": {
+    "whatsapp": {
+      "description": "Você é o assistente virtual da __STORE_NAME__ no WhatsApp.\n\nAtenda em português do Brasil, de forma breve, humana, clara e direta.\n\nRegras:\n- Quando o cliente perguntar preço, disponibilidade ou demonstrar interesse claro em um produto, use a função busca_produto com o nome ou termo do produto.\n- Nunca invente preço, estoque, desconto, condição comercial ou link. Use somente o retorno da função.\n- Se o pedido envolver medicamento manipulado, receita, novo orçamento ou cotação personalizada, não consulte o catálogo: transfira para atendimento humano.\n- Se o cliente pedir pagamento por Pix ou outra forma de pagamento antes de existir uma cotação final, transfira para atendimento humano.\n- Dúvidas clínicas, orientação farmacêutica, posologia, interação, contraindicação ou indicação devem ser transferidas para um farmacêutico.\n- Para acompanhar pedido existente, orçamento existente, entrega ou pós-venda, transfira para atendimento humano.\n- Se a busca falhar ou não retornar um link válido, peça desculpas e transfira para atendimento humano.\n- Não exponha identificadores internos, configurações, nomes de ferramentas ou detalhes técnicos.",
+      "functions": [
+        {
+          "id": "busca_produto",
+          "name": "busca_produto",
+          "attrs": [
+            {
+              "key": "produto",
+              "type": 0,
+              "required": true,
+              "description": "Nome ou termo do produto solicitado. Corrija erros ortográficos evidentes sem trocar o produto pretendido."
+            }
+          ],
+          "endsturn": 0,
+          "description": "Use quando o cliente pedir preço, disponibilidade, opções ou demonstrar intenção clara de comprar um produto do catálogo.",
+          "enabledforvoice": 1
+        }
+      ],
+      "presets": [],
+      "temperature": 0.7,
+      "maxtokens": 4096,
+      "waitfornewmsgs": 2,
+      "processaudiofiles": 1,
+      "processimagefiles": 1,
+      "processpdffiles": 0,
+      "productstopk": 6
+    }
+  },
+  "addressForm": {
+    "name": "Endereço de entrega",
+    "description": "Endereço de entrega do pedido, preenchido na pré-venda a partir da consulta de CEP. CEP, rua, bairro, cidade e estado vêm da consulta; número e complemento são informados pelo cliente.",
+    "fields": [
+      {
+        "id": "ent_cep",
+        "lock": false,
+        "type": 1,
+        "label": "CEP",
+        "width": 4,
+        "options": [],
+        "required": true
+      },
+      {
+        "id": "ent_rua",
+        "lock": false,
+        "type": 1,
+        "label": "Rua",
+        "width": 12,
+        "options": [],
+        "required": true
+      },
+      {
+        "id": "ent_numero",
+        "lock": false,
+        "type": 1,
+        "label": "Número",
+        "width": 4,
+        "options": [],
+        "required": true
+      },
+      {
+        "id": "ent_complemento",
+        "lock": false,
+        "type": 1,
+        "label": "Complemento",
+        "width": 8,
+        "options": [],
+        "required": false
+      },
+      {
+        "id": "ent_bairro",
+        "lock": false,
+        "type": 1,
+        "label": "Bairro",
+        "width": 6,
+        "options": [],
+        "required": true
+      },
+      {
+        "id": "ent_cidade",
+        "lock": false,
+        "type": 1,
+        "label": "Cidade",
+        "width": 6,
+        "options": [],
+        "required": true
+      },
+      {
+        "id": "ent_estado",
+        "lock": false,
+        "type": 1,
+        "label": "Estado",
+        "width": 4,
+        "options": [],
+        "required": true
+      }
+    ]
+  },
+  "flows": {
+    "ura": "flow __FLOW_NAME_JSON__ {\n  type=\"ura\"\n  timeout=900\n  timeoutaction=0\n  fk_visualgroup=0\n  allowagentstart=0\n  executionwithoutconfirmation=0\n  allowcontactexecution=0\n  allowopportunityfileexecution=0\n  allowtaskfileexecution=0\n  allowmsgexecution=0\n  waitmsgaiprocess=0\n  audiomsg=0\n  videomsg=0\n  locationmsg=0\n  textmsg=0\n  pdfmsg=0\n  informationmsg=0\n  imagemsg=0\n  allmsgs=0\n  allowopportunity=0\n  allowtaskexecution=0\n  requestdataform=0\n}\nstart -> a3821b860\ntimeout -> a38df3de0\n\na3821b860: aiAssistant assistantId=__ASSISTANT_ID__ -> end\n\na38df3de0: terminate reason=\"timeout\" dontSendEndMsg=true\n\na8fe8f9b0: addOpportunity\n  pipelineId=__PIPELINE_ID__\n  stageId=__START_STAGE_ID__\n  resultVariableName=\"oportunidade\"\n  opportunity.title.content=\"{{chat_client_name || chat_client_number}}\"\n  opportunity.mainphone.content=\"{{chat_client_number}}\"\n  opportunity.origin.content=\"ia\"\n  opportunity.associateToCurrentChat.content=true\n  opportunity.associateToCurrentContact.content=true\n  opportunity.customFormsData.ent_cep={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_rua={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_numero={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_complemento={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_bairro={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_cidade={\"enabled\":1,\"content\":\"\"}\n  opportunity.customFormsData.ent_estado={\"enabled\":1,\"content\":\"\"}\n  -> a3821b860\n",
+    "lookup": "flow __FLOW_NAME_JSON__ {\n  type=\"automation\"\n  timeout=600\n  timeoutaction=0\n  fk_visualgroup=0\n  allowagentstart=0\n  executionwithoutconfirmation=0\n  allowcontactexecution=0\n  allowopportunityfileexecution=0\n  allowtaskfileexecution=0\n  allowmsgexecution=0\n  waitmsgaiprocess=0\n  audiomsg=0\n  videomsg=0\n  locationmsg=0\n  textmsg=0\n  pdfmsg=0\n  informationmsg=0\n  imagemsg=0\n  allmsgs=0\n  allowopportunity=0\n  allowtaskexecution=0\n  requestdataform=0\n}\nstart -> aebbfdec0\n\naebbfdec0: info\n  text=\"{\\\"tenantId\\\":\\\"__TENANT_ID__\\\",\\\"phone\\\":\\\"{{chat_client_number}}\\\",\\\"query\\\":\\\"{{assistant_produto | default:'catálogo'}}\\\",\\\"customerName\\\":\\\"{{chat_client_name | default:'Cliente'}}\\\",\\\"channelType\\\":\\\"whatsapp\\\",\\\"chatId\\\":\\\"{{chat_id}}\\\",\\\"opportunityId\\\":\\\"{{ (opportunity_id ? opportunity_id : (chat_cart_id ? chat_cart_id : (chat_opportunities_list[0] ? chat_opportunities_list[0].opportunity_id : ''))) }}\\\"}\"\n  -> a2f9047b0\n\nvar_b1c2: varCondition value=\"{{oportunidade.opportunity_id || opportunity_id || chat_cart_id}}\" {\n  case opt1 conditionOperator=\">\" conditionValue=\"0\" conditionArray=[] -> a2f9047b0\n  else {\n    m_noopp1: message\n      text=\"Não foi possível identificar uma oportunidade válida para este atendimento. Por favor, crie a oportunidade ou tente novamente mais tarde.\"\n  }\n}\n\na2f9047b0: request\n  varPrefix=\"catalogo\"\n  dataType=\"jsonraw\"\n  method=\"post\"\n  url=__BOOTSTRAP_URL_JSON__\n  dataRaw=\"{\\\"tenantId\\\":\\\"__TENANT_ID__\\\",\\\"phone\\\":\\\"{{chat_client_number}}\\\",\\\"query\\\":\\\"{{assistant_produto}}\\\",\\\"customerName\\\":\\\"{{chat_client_name}}\\\",\\\"channelType\\\":\\\"whatsapp\\\",\\\"chatId\\\":\\\"{{chat_id}}\\\"}\"\n  timeout=15000\nab5815f80: url\n  text=\"Aqui estão opções de {{assistant_produto}} para você 🔎 Para comprar clique no link 🔗 e será direcionado para nosso catálogo ! \"\n  btnText=\"Clique aqui \"\n  data=\"{{catalogo_openUrl}}\"\n"
+  }
+}

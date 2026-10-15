@@ -337,6 +337,8 @@ model ClientDeploymentUnit {
   createdAt                   DateTime                @default(now()) @db.Timestamp(6)
   updatedAt                   DateTime                @updatedAt @db.Timestamp(6)
   events                      ClientDeploymentEvent[]
+  atenderBemConfig            Json?
+  atenderBemSecretsEncrypted  String?
 
   @@unique([deploymentId, code])
   @@unique([deploymentId, provider, sourceUnitId])
