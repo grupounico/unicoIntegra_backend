@@ -2,7 +2,7 @@ import { prisma } from '../../../prisma/PrismaClient.js';
 import { encryptSecret, decryptSecret } from './crypto.js';
 import { DeploymentError } from './errors.js';
 import { normalizeAtenderBemConfig, feedIdFromUnit, buildFeedUrl, preserveAtenderBemProgress } from './atenderbem-config.js';
-import { createMcpClient } from './adapters/mcp.client.js';
+import { createMcpClient, LabError } from './adapters/mcp.client.js';
 import { Prisma } from '@prisma/client';
 import { readAtenderBemFeed } from './atenderbem-feed.js';
 
@@ -56,13 +56,15 @@ export async function createAtenderBemGroup(deploymentId, unitId, requestedBy, d
   const claim = await database.clientDeploymentUnit.updateMany({ where: { id: unitId, deploymentId, atenderBemConfig: { equals: config } }, data: { atenderBemConfig: claimed } });
   if (claim.count !== 1) throw new DeploymentError('ATENDERBEM_GROUP_BUSY', 'A configuração mudou ou a criação já está em andamento.', { statusCode: 409 });
   let creationSent = false;
-  let validatingFeed = true;
+  let validatingFeed = false;
   try {
     const secrets = JSON.parse(decryptSecret(unit.atenderBemSecretsEncrypted));
-    await readAtenderBemFeed(unit, config, secrets, dependencies);
-    validatingFeed = false;
+    // Check the MCP destination and authentication before downloading the CSV.
     const client = makeClient({ mcpUrl: config.mcpUrl, mcpKey: secrets.mcpKey });
     const tools = await client.tools();
+    validatingFeed = true;
+    await readAtenderBemFeed(unit, config, secrets, dependencies);
+    validatingFeed = false;
     creationSent = true;
     const group = await client.call('product_groups_create', { name: config.groupName, description: `Catálogo da unidade ${unit.name}, configurado pelo Integra.` }, tools);
     const id = Number(group?.id);
@@ -78,6 +80,7 @@ export async function createAtenderBemGroup(deploymentId, unitId, requestedBy, d
     if (validatingFeed) {
       throw new DeploymentError('ATENDERBEM_FEED_VALIDATION_FAILED', `Não foi criado nenhum grupo. ${error.message}`, { statusCode: 422 });
     }
+    if (!creationSent && error instanceof LabError) throw error;
     throw new DeploymentError('ATENDERBEM_GROUP_CREATION_FAILED', creationSent
       ? 'Não foi possível confirmar a criação. Confira o grupo no AtenderBem antes de repetir para evitar duplicação.'
       : 'Não foi possível conectar ao MCP. Confira a chave e a disponibilidade da instância.', { statusCode: 502 });

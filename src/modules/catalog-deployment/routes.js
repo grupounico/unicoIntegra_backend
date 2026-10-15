@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import * as controller from './controller.js';
 import assistantRoutes from './atenderbem-assistant-routes.js';
-import { apiKeyMiddleware } from '../../middlewares/apiKey.middleware.js';
+import { integraSessionMiddleware } from '../../middlewares/integraSession.middleware.js';
 
 const router = Router();
-router.use('/:deploymentId/units/:unitId/atenderbem', apiKeyMiddleware);
+router.use('/:deploymentId/units/:unitId/atenderbem', integraSessionMiddleware);
 router.use('/:deploymentId/units/:unitId/atenderbem/assistant', assistantRoutes);
 router.post('/', controller.create);
 router.get('/', controller.list);

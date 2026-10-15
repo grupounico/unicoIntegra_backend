@@ -6,7 +6,9 @@ A etapa final funciona em implantações completas, Hub e Banco Único e registr
 
 1. Aplicar `prisma migrate deploy` (migration 20261007180000_add_atenderbem_configuration) e gerar o Prisma Client.
 2. Configurar DEPLOYMENT_ENCRYPTION_KEY, CATALOG_ATENDERBEM_FEED_BASE_URL (URL HTTPS completa do feed, sem query) e as listas de hosts no .env.example. Acrescentar instâncias permitidas a CATALOG_MCP_ALLOWED_HOSTS e hosts do feed a CATALOG_FEED_ALLOWED_HOSTS. CATALOG_UPLOAD_ALLOWED_HOSTS só é necessário se o armazenamento não estiver na mesma origem do MCP.
-3. Publicar o backend antes do frontend. Todas as rotas de configuração, grupo, importação e assistente exigem `X-API-Key` igual à `ADMIN_API_KEY` do Integra; esta não é a chave MCP. O operador informa a chave administrativa no formulário, mantida somente em memória. Após recarregar a página, informe-a novamente. Sem ela, não há consultas automáticas da importação.
+3. Publicar o backend antes do frontend. O navegador envia o Bearer da sessão já criada pelo login do Integra. O backend valida esse token na autoridade fixa do login, por uma leitura autenticada de URAs; sessão inválida, indisponibilidade ou resposta inesperada bloqueiam a operação. Não é preciso informar ADMIN_API_KEY nas telas. X-API-Key permanece opcional para compatibilidade de clientes de API; nunca é embutida no frontend.
+
+Somente hosts explicitamente liberados podem receber as credenciais MCP. Para a instância Drogasara, acrescentar `drogasara.atenderbem.com` a CATALOG_MCP_ALLOWED_HOSTS, preservando os outros destinos; não usar wildcard. O MCP é conferido antes de baixar o CSV. Falhas de conexão preservam as chaves cifradas. A tela informa “chave salva” e aceita campos vazios para mantê-las, inclusive quando a URL HTTPS foi digitada com porta explícita 443.
 
 O parâmetro unidadeId vem exclusivamente de hubSellerUnitId da unidade selecionada. A URL é montada no servidor a partir do ambiente. Credenciais MCP e feed são cifradas e não retornam nas consultas. Os campos vazios preservam credenciais salvas; mudar endereço/autenticação exige nova credencial.
 

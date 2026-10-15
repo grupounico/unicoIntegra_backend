@@ -1,6 +1,10 @@
-// MCP transport. Credentials live only for the duration of a request.
-export class LabError extends Error {
-  constructor(message, status = 400) { super(message); this.status = status; }
+import { DeploymentError } from '../errors.js';
+// Only curated diagnostic messages; upstream bodies and credentials stay private.
+export class LabError extends DeploymentError {
+  constructor(message, status = 400, code = 'ATENDERBEM_CONNECTION_ERROR', httpStatus = null) {
+    super(code, message, { statusCode: status, stage: 'atenderbem_connection', httpStatus });
+    this.status = status;
+  }
 }
 
 export const TOOL_NAMES = ['product_groups_create', 'files_create_upload_url', 'products_import', 'products_import_status', 'products_reindex',
@@ -15,7 +19,7 @@ export function allowedUrl(raw, kind, environment = process.env) {
   const hosts = String(environment[kind === 'mcp' ? 'CATALOG_MCP_ALLOWED_HOSTS' : 'CATALOG_FEED_ALLOWED_HOSTS'] ||
     (kind === 'mcp' ? 'ambientesdetesteunicocontato.atenderbem.com' : 'unicocontato.tech')).split(',').map(x => x.trim());
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.port && url.port !== '443') || !hosts.includes(url.hostname)) {
-    throw new LabError(`Destino não permitido para ${kind}. Configure a lista de hosts no backend.`);
+    throw new LabError(`Destino não permitido para ${kind}. Solicite a liberação deste host no backend; as chaves salvas foram preservadas.`, 403, 'ATENDERBEM_DESTINATION_NOT_ALLOWED');
   }
   if (kind === 'mcp' && url.pathname.replace(/\/$/, '') !== '/mcp') throw new LabError('A URL do MCP deve terminar em /mcp.');
   return url.toString();
@@ -100,7 +104,7 @@ export function createMcpClient(config, { fetchImpl = fetch, environment = proce
           ...(session ? { 'Mcp-Session-Id': session } : {}), 'MCP-Protocol-Version': version },
         body: JSON.stringify({ jsonrpc: '2.0', ...(notification ? {} : { id }), method, params }) });
     } catch { throw new LabError('Não foi possível conectar ao MCP dentro do prazo. Confira a URL e a rede.', 502); }
-    if (!response.ok) throw new LabError(`MCP retornou HTTP ${response.status}. ${[401, 403].includes(response.status) ? 'Confira a chave e a permissão da instância.' : 'Confira a disponibilidade do serviço.'}`, 502);
+    if (!response.ok) throw new LabError(`MCP retornou HTTP ${response.status}. ${[401, 403].includes(response.status) ? 'Confira a chave MCP e a permissão da instância.' : response.status === 404 ? 'Confira se o MCP está habilitado na instância e se a URL termina em /mcp.' : 'Confira a disponibilidade do serviço.'}`, 502, 'ATENDERBEM_MCP_HTTP_ERROR', response.status);
     session = response.headers.get('Mcp-Session-Id') || session;
     if (notification) { await response.body?.cancel(); return; }
     // Consume only until the matching SSE event; some servers keep the stream open.
