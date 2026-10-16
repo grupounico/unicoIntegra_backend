@@ -3,6 +3,11 @@ import * as service from './service.js';
 import { saveAtenderBemConfiguration, createAtenderBemGroup } from './atenderbem-service.js';
 import { getAtenderBemSettings } from './atenderbem-config.js';
 import { startAtenderBemImport, checkAtenderBemImport } from './atenderbem-import.js';
+import { prisma } from '../../../prisma/PrismaClient.js';
+import { createAiVenda } from '../../services/ai.services.js';
+import { aiStep } from './ai-step.js';
+
+const ai = aiStep({ database: prisma, installers: { venda: createAiVenda } });
 
 function actor(req) { return String(req.body?.requestedBy || req.headers['x-operator-name'] || 'Sistema').trim() || 'Sistema'; }
 function correlation(req) { return String(req.headers['x-correlation-id'] || req.headers['x-request-id'] || '').trim() || null; }
@@ -26,6 +31,7 @@ export const updateUnit = handler((req) => service.updateDeploymentUnit(req.para
 export const saveAtenderBem = handler((req) => saveAtenderBemConfiguration(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const createAtenderBemGroupHandler = handler((req) => createAtenderBemGroup(req.params.deploymentId, req.params.unitId, actor(req)));
 export const startAtenderBemImportHandler = handler((req) => startAtenderBemImport(req.params.deploymentId, req.params.unitId, actor(req)), 202);
+export const createAiHandler = handler((req) => ai.createAi(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const checkAtenderBemImportHandler = handler((req) => checkAtenderBemImport(req.params.deploymentId, req.params.unitId));
 export const start = handler((req) => service.startDeployment(req.params.deploymentId, actor(req)), 202);
 export const refreshRuns = handler((req) => service.refreshDeploymentRuns(req.params.deploymentId));
