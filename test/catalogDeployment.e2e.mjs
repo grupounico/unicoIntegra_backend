@@ -3,12 +3,14 @@ import http from 'node:http';
 import axios from 'axios';
 
 const databaseUrl = process.env.CATALOG_E2E_DATABASE_URL || 'postgresql://postgres:catalog_test@127.0.0.1:55432/unico_integra_test';
+const testDatabase = new URL(databaseUrl);
+assert.ok(['127.0.0.1', 'localhost'].includes(testDatabase.hostname) && testDatabase.pathname === '/unico_integra_test', 'E2E requires a dedicated loopback test database');
 Object.assign(process.env, {
   DATABASE_URL: databaseUrl,
   DBHOST: '127.0.0.1',
-  DBPORT: '55432',
-  DBUSER: 'postgres',
-  DBPASSWORD: 'catalog_test',
+  DBPORT: testDatabase.port || '5432',
+  DBUSER: decodeURIComponent(testDatabase.username),
+  DBPASSWORD: decodeURIComponent(testDatabase.password),
   DB_DATABASE: 'unico_integra_test',
   DEPLOYMENT_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
   HUBUNICO_BASE_URL: 'http://127.0.0.1:56100',
@@ -175,14 +177,23 @@ const commerceServer = await server(56101, async (req, res) => {
     assert.equal(payload.erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
     assert.equal(payload.erpConfig.orderWebhookUrl, orderWebhookUrl);
     assert.equal(payload.status, 'inactive');
+    assert.equal(payload.storefrontDomain, storefrontDomain);
+    assert.equal(payload.ecommerceBaseUrl, `https://${storefrontDomain}`);
     const tenant = { ...payload, id: 'tenant-1', hasErpCredentials: true };
+    // Current create API persists ecommerceBaseUrl but leaves domain association to PATCH.
+    delete tenant.storefrontDomain;
     delete tenant.erpCredentials;
     tenants.set(tenant.id, tenant);
     return json(res, 201, tenant);
   }
-  if (req.method === 'GET' && url.pathname === '/api/tenants/tenant-1') return json(res, 200, tenants.get('tenant-1'));
+  if (req.method === 'GET' && url.pathname.startsWith('/api/tenants/')) {
+    const tenant = tenants.get(url.pathname.split('/').at(-1));
+    return json(res, tenant ? 200 : 404, tenant || {});
+  }
   if (req.method === 'PATCH' && url.pathname === '/api/tenants/tenant-1') {
     const payload = await body(req);
+    assert.equal(payload.storefrontDomain, storefrontDomain);
+    assert.equal(payload.ecommerceBaseUrl, `https://${storefrontDomain}`);
     if (payload.erpConfig) {
       assert.equal(payload.erpConfig.unidadeId, 10);
       assert.equal(payload.erpConfig.baseUrl, 'http://127.0.0.1:56100');
@@ -250,7 +261,7 @@ try {
       nome: 'Farmácia Matriz',
       cnpj: '11222333000181',
       sourceUnitId: 1,
-      credentialRef: 'postgresql://postgres:catalog_test@127.0.0.1:55432/unico_integra_test',
+      credentialRef: databaseUrl,
       orderWebhookUrl,
     }],
   };
@@ -303,6 +314,8 @@ try {
     assert.equal(deployment.status, 'reconciliation_required');
     assert.equal(deployment.lastErrorCode, 'STOREFRONT_AUTHENTICATION_REQUIRED');
     assert.equal(tenants.get('tenant-1').status, 'active');
+    // Legacy Franca: active tenant with products, but the ecommerce URL was not saved.
+    tenants.get('tenant-1').ecommerceBaseUrl = null;
     const priorSteps = deployment.steps;
     const beforePublished = publishedProducts;
     const sameJob = deployment.units[0].bancoUnicoImportJobId;
@@ -316,6 +329,7 @@ try {
     await processDeployment(deploymentId);
     deployment = (await api(`/api/v1/deployments/${deploymentId}`)).body;
     assert.equal(deployment.status, 'completed');
+    assert.equal(tenants.get('tenant-1').ecommerceBaseUrl, `https://${storefrontDomain}`);
     assert.ok(deployment.activatedAt);
     assert.equal(deployment.units[0].bancoUnicoImportJobId, sameJob);
     assert.equal(publishedProducts, beforePublished);
@@ -326,6 +340,7 @@ try {
     const originalUnit = await prisma.clientDeploymentUnit.findUnique({ where: { id: unitId } });
     const { id: _id, ...unitData } = originalUnit;
     const second = await prisma.clientDeploymentUnit.create({ data: { ...unitData, code: 'FILIAL', slug: 'filial', sourceUnitId: 99, isInitial: false, hubSellerUnitId: 99, hubIntegrationId: 99, unicommerceTenantId: 'tenant-2', storefrontDomain: 'whatsapp-filial.vercel.app' } });
+    tenants.set('tenant-2', { ...tenants.get('tenant-1'), id: 'tenant-2', hubSellerUnitId: 99, storefrontDomain: second.storefrontDomain, ecommerceBaseUrl: `https://${second.storefrontDomain}` });
     await prisma.clientDeploymentUnit.update({ where: { id: unitId }, data: { status: 'failed', storefrontStatus: 'reconciliation_required', lastErrorCode: 'STOREFRONT_HEALTH_CHECK_FAILED' } });
     await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { status: 'partially_failed' } });
     identityFailure = 408;
@@ -378,6 +393,7 @@ try {
   assert.equal(deployment.progress.completedUnits, 1);
   assert.equal(tenants.get('tenant-1').status, 'active');
   assert.equal(tenants.get('tenant-1').storefrontDomain, storefrontDomain);
+  assert.equal(tenants.get('tenant-1').ecommerceBaseUrl, `https://${storefrontDomain}`);
   assert.equal(tenants.get('tenant-1').erpConfig.baseUrl, 'http://127.0.0.1:56100');
   assert.equal(tenants.get('tenant-1').erpConfig.requestPath, '/api/v1/produtos/consultar-eans');
   assert.equal(tenants.get('tenant-1').erpConfig.orderWebhookUrl, orderWebhookUrl);

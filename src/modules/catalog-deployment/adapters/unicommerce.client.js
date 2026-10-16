@@ -1,5 +1,6 @@
 import { DeploymentError, mapUpstreamError } from '../errors.js';
 import { createHttpClient, withRetry } from './http.js';
+import { tenantStorefrontUrls, assertTenantStorefrontUrls } from '../storefront.js';
 
 function client(target) {
   if (!target?.baseUrl || !target?.internalApiKey) throw new DeploymentError('UNICOMMERCE_NOT_CONFIGURED', 'UnicommerceBack não está configurado para o ambiente da implantação.', { statusCode: 503, stage: 'unicommerce' });
@@ -15,7 +16,8 @@ export async function findTenantByHubUnit(target, hubUnitId) {
   catch (error) { if (error.response?.status === 404) return null; throw mapUpstreamError(error, 'UNICOMMERCE', 'provisioning_unicommerce'); }
 }
 export async function createTenant(target, payload, idempotencyKey, unitId) {
-  try { return (await withRetry(() => client(target).post('/api/tenants', payload, { headers: { 'Idempotency-Key': idempotencyKey } }))).data; }
+  const routing = tenantStorefrontUrls(payload, unitId);
+  try { return (await withRetry(() => client(target).post('/api/tenants', { ...payload, ...routing }, { headers: { 'Idempotency-Key': idempotencyKey } }))).data; }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'provisioning_unicommerce', unitId); }
 }
 export async function getTenant(target, tenantId, unitId) {
@@ -25,8 +27,9 @@ export async function getTenant(target, tenantId, unitId) {
     throw mapUpstreamError(error, 'UNICOMMERCE', 'validating_unicommerce', unitId);
   }
 }
-export async function configureTenantCatalogSource(target, tenantId, erpConfig, unitId) {
-  try { return (await client(target).patch(`/api/tenants/${tenantId}`, { erpConfig })).data; }
+export async function configureTenantCatalogSource(target, tenantId, erpConfig, unitId, routing) {
+  const urls = tenantStorefrontUrls(routing, unitId);
+  try { return (await client(target).patch(`/api/tenants/${tenantId}`, { erpConfig, ...urls })).data; }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'provisioning_unicommerce', unitId); }
 }
 export async function validateTenantCatalog(target, tenantId, unitId) {
@@ -54,25 +57,25 @@ export async function confirmAsset(target, payload) {
   try { return (await client(target).post('/api/internal/assets/confirm', payload)).data; }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'assets'); }
 }
-export async function configureBranding(target, tenantId, assets, unitId) {
-  try { await client(target).patch(`/api/tenants/${tenantId}`, { branding: assets }); }
+export async function configureBranding(target, tenantId, assets, unitId, routing) {
+  const urls = tenantStorefrontUrls(routing, unitId);
+  try { await client(target).patch(`/api/tenants/${tenantId}`, { branding: assets, ...urls }); }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'branding', unitId); }
 }
-export async function activateTenant(target, tenantId, idempotencyKey, unitId) {
-  try { return (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, { status: 'active' }, { headers: { 'Idempotency-Key': idempotencyKey } }))).data; }
+export async function activateTenant(target, tenantId, idempotencyKey, unitId, routing) {
+  const urls = tenantStorefrontUrls(routing, unitId);
+  try {
+    return (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, { status: 'active', ...urls }, { headers: { 'Idempotency-Key': idempotencyKey } }))).data;
+  }
   catch (error) { throw mapUpstreamError(error, 'UNICOMMERCE', 'activating_tenants', unitId); }
 }
 
-export async function configureStorefrontDomain(target, tenantId, storefrontDomain, unitId, expectedStatus = 'inactive') {
+export async function configureStorefrontDomain(target, tenantId, storefrontDomain, unitId, expectedStatus = 'inactive', ecommerceBaseUrl) {
+  const urls = tenantStorefrontUrls({ storefrontDomain, ecommerceBaseUrl }, unitId);
   try {
-    const tenant = (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, { storefrontDomain }))).data;
-    if (tenant.storefrontDomain !== storefrontDomain || tenant.status !== expectedStatus) {
-      throw new DeploymentError('DOMAIN_TENANT_MISMATCH', `O domínio não foi associado ao tenant ${expectedStatus} esperado.`, {
-        statusCode: 409, stage: 'provisioning_storefront', unitId,
-        action: 'Revise o tenant no UnicommerceBack antes de repetir.',
-      });
-    }
-    return tenant;
+    const tenant = (await withRetry(() => client(target).patch(`/api/tenants/${tenantId}`, urls))).data;
+    assertTenantStorefrontUrls(tenant, urls, tenantId, unitId, expectedStatus);
+    return assertTenantStorefrontUrls(await getTenant(target, tenantId, unitId), urls, tenantId, unitId, expectedStatus);
   } catch (error) {
     if (error instanceof DeploymentError) throw error;
     if (error.response?.status === 409) {

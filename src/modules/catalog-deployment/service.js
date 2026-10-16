@@ -8,7 +8,7 @@ import { DeploymentError, publicError } from './errors.js';
 import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugify, validateCreatePayload, validateUnitUpdatePayload } from './validation.js';
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
 import { activatedTenantCanResume, buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
-import { buildStorefrontDomain, selectStorefrontDomain } from './storefront.js';
+import { buildStorefrontDomain, selectStorefrontDomain, tenantStorefrontUrls, assertTenantStorefrontUrls } from './storefront.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 import * as vercel from './adapters/vercel.client.js';
@@ -493,12 +493,18 @@ async function provisionCommerce(deployment, units, assets) {
       const requiredErpConfig = buildTenantErpConfig(targets.hub, unit.hubSellerUnitId, tenant?.erpConfig, orderWebhookUrl);
       if (tenant) await event(deployment.id, 'unicommerce_tenant_reconciled', { unitId: unit.id, metadata: { tenantId: String(tenant.id), hubSellerUnitId: String(unit.hubSellerUnitId) } });
       if (tenant && Number(tenant.hubSellerUnitId) !== Number(unit.hubSellerUnitId)) throw new DeploymentError('UNICOMMERCE_INVALID_UNIT_MAPPING', 'O tenant existente pertence a outra unidade.', { statusCode: 409, stage: 'provisioning_unicommerce', unitId: unit.id });
-      if (!tenant) { const stepKey = `${deployment.id}:${unit.id}:tenant`; tenant = await trackedStep(deployment.id, unit.id, 'unicommerce_create_tenant', () => commerce.createTenant(targets.unicommerce, { slug: unit.slug, name: unit.name, hubSellerId: Number(deployment.hubSellerId), hubSellerUnitId: Number(unit.hubSellerUnitId), deploymentId: deployment.id, erpProvider: 'alpha7', erpConfig: requiredErpConfig, erpCredentials: { hubUnicoApiKey: apiKey }, status: 'inactive' }, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, slug: unit.slug, provider: 'alpha7', hubSellerUnitId: String(unit.hubSellerUnitId), status: 'inactive', hasCredential: true }, response: (value) => ({ tenantId: String(value.id) }) }); }
-      const tenantId = tenant.id; await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { unicommerceTenantId: String(tenantId), status: 'unicommerce_tenant_created' } });
-      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath, hasOrderWebhookUrl: true } });
+      const routing = tenantStorefrontUrls({ storefrontDomain: selectStorefrontDomain({
+        persistedDomain: unit.storefrontDomain, tenantDomain: tenant?.storefrontDomain,
+        username: deployment.username, unit, prefix: targets.storefront.domainPrefix, suffix: targets.storefront.domainSuffix,
+      }) }, unit.id);
+      if (!tenant) { const stepKey = `${deployment.id}:${unit.id}:tenant`; tenant = await trackedStep(deployment.id, unit.id, 'unicommerce_create_tenant', () => commerce.createTenant(targets.unicommerce, { slug: unit.slug, name: unit.name, hubSellerId: Number(deployment.hubSellerId), hubSellerUnitId: Number(unit.hubSellerUnitId), deploymentId: deployment.id, erpProvider: 'alpha7', erpConfig: requiredErpConfig, erpCredentials: { hubUnicoApiKey: apiKey }, status: 'inactive', ...routing }, stepKey, unit.id), { idempotencyKey: stepKey, request: { environment: deployment.environment, slug: unit.slug, provider: 'alpha7', hubSellerUnitId: String(unit.hubSellerUnitId), status: 'inactive', hasCredential: true, ...routing }, response: (value) => ({ tenantId: String(value.id) }) }); }
+      const tenantId = tenant.id; await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { unicommerceTenantId: String(tenantId), storefrontDomain: routing.storefrontDomain, status: 'unicommerce_tenant_created' } });
+      // Older create endpoints ignore storefrontDomain; PATCH establishes both fields before advancing.
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_catalog_source', () => commerce.configureTenantCatalogSource(targets.unicommerce, tenantId, requiredErpConfig, unit.id, routing), { request: { environment: deployment.environment, tenantId: String(tenantId), hubSellerUnitId: String(unit.hubSellerUnitId), baseUrl: requiredErpConfig.baseUrl, requestPath: requiredErpConfig.requestPath, hasOrderWebhookUrl: true, ...routing } });
       const confirmed = await trackedStep(deployment.id, unit.id, 'unicommerce_validate_tenant', () => commerce.getTenant(targets.unicommerce, tenantId, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId) }, response: (value) => ({ tenantId: String(value.id), status: value.status, hasCredential: value.hasErpCredentials === true }) });
       if (!tenantConfigurationIsValid(confirmed, requiredErpConfig, unit.hubSellerUnitId)) throw new DeploymentError('UNICOMMERCE_HEALTH_CHECK_FAILED', 'O tenant criado não passou na validação de configuração.', { stage: 'validating_unicommerce', unitId: unit.id });
-      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding) } });
+      assertTenantStorefrontUrls(confirmed, routing, tenantId, unit.id, 'inactive');
+      await trackedStep(deployment.id, unit.id, 'unicommerce_configure_branding', () => commerce.configureBranding(targets.unicommerce, tenantId, branding, unit.id, routing), { request: { environment: deployment.environment, tenantId: String(tenantId), assetTypes: Object.keys(branding), ...routing } });
       await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'unicommerce_ready' } });
     } catch (error) { await failUnit(deployment, unit, error); }
   }
@@ -902,13 +908,13 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
           activated ? 'active' : 'inactive',
         ), {
           idempotencyKey: `${deployment.id}:${unit.id}:storefront-tenant:${idempotencyKey}`,
-          request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, domain },
-          response: (tenant) => ({ tenantId: String(tenant.id), domain: tenant.storefrontDomain, status: tenant.status }),
+          request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, domain, ecommerceBaseUrl: `https://${domain}` },
+          response: (tenant) => ({ tenantId: String(tenant.id), domain: tenant.storefrontDomain, ecommerceBaseUrl: tenant.ecommerceBaseUrl, status: tenant.status }),
         });
       if (!activated) {
         const stepKey = `${deployment.id}:${unit.id}:auto-activation`;
         await trackedStep(deployment.id, unit.id, 'unicommerce_activate_tenant',
-          () => commerce.activateTenant(catalogTargets(deployment.environment).unicommerce, unit.unicommerceTenantId, stepKey, unit.id), {
+          () => commerce.activateTenant(catalogTargets(deployment.environment).unicommerce, unit.unicommerceTenantId, stepKey, unit.id, { storefrontDomain: domain }), {
             idempotencyKey: stepKey, request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId },
           });
         await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: 'active' } });
@@ -974,6 +980,32 @@ async function completeStorefrontDeployment(deployment, actor, storefront, snaps
       retryable: incomplete[0].retryable,
     } });
     return;
+  }
+  // Validate persisted routing even for units already marked ready on an earlier attempt.
+  // This is a bounded installation check, never part of periodic alias reconciliation.
+  const target = catalogTargets(deployment.environment).unicommerce;
+  for (const unit of deployment.units) {
+    try {
+      const tenant = await commerce.getTenant(target, unit.unicommerceTenantId, unit.id);
+      const routing = { storefrontDomain: unit.storefrontDomain || storefront.domains.find((item) => item.unitId === unit.id)?.domain };
+      try { assertTenantStorefrontUrls(tenant, routing, unit.unicommerceTenantId, unit.id, 'active'); }
+      catch (error) {
+        if (error.code !== 'ECOMMERCE_BASE_URL_NOT_PERSISTED') throw error;
+        await trackedStep(deployment.id, unit.id, 'unicommerce_configure_storefront_domain',
+          () => commerce.configureStorefrontDomain(target, unit.unicommerceTenantId, routing.storefrontDomain, unit.id, 'active'), {
+            request: { environment: deployment.environment, tenantId: unit.unicommerceTenantId, ...tenantStorefrontUrls(routing, unit.id) },
+            response: (value) => ({ tenantId: value.id, storefrontDomain: value.storefrontDomain, ecommerceBaseUrl: value.ecommerceBaseUrl }),
+          });
+      }
+    } catch (error) {
+      const exposed = publicError(error, { unitId: unit.id });
+      error.unitId ||= unit.id;
+      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+        status: 'reconciliation_required', storefrontStatus: 'reconciliation_required',
+        lastErrorCode: exposed.code, lastErrorMessage: exposed.message, retryable: exposed.retryable,
+      } });
+      throw error;
+    }
   }
   const completedSnapshot = { ...snapshot, storefront: storefront.domains };
   await finalizeDeploymentCredentials(deployment);

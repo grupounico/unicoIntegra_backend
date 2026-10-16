@@ -37,6 +37,37 @@ Depois de mudar a flag, reinicie o processo com `--update-env`. Confira o campo
 
 ## Storefront compartilhado na Vercel
 
+### Endereço do catálogo por tenant
+
+O instalador envia os dois campos em cada criação/atualização do tenant:
+
+```json
+{
+  "storefrontDomain": "whatsapp-unidade-franca.vercel.app",
+  "ecommerceBaseUrl": "https://whatsapp-unidade-franca.vercel.app"
+}
+```
+
+`storefrontDomain` é somente o hostname. `ecommerceBaseUrl` é derivado desse
+hostname e deve usar HTTPS, sem caminho, credenciais, query ou fragmento. Não há
+fallback para a URL global da Complexo Pharma ou de outra unidade.
+
+Por compatibilidade com a API de criação que ainda ignora `storefrontDomain`,
+o instalador também envia ambos no PATCH de configuração e confirma com GET.
+A instalação não avança/conclui se o tenant não retornar os valores esperados;
+o erro `ECOMMERCE_BASE_URL_NOT_PERSISTED` indica URL ausente ou divergente.
+A conclusão faz uma leitura final, incluindo unidades já prontas de uma tentativa
+anterior. A retomada corrige a URL reutilizando tenant, produtos e domínio.
+Essa validação não é executada pela reconciliação periódica de aliases.
+
+Para uma instalação existente, confirme primeiro a identidade e o domínio do
+tenant. A correção pontual usa `PATCH /api/tenants/{TENANT_ID}` no UnicommerceBack
+do ambiente correto, com `X-Internal-API-Key`, enviando `ecommerceBaseUrl` HTTPS
+do próprio tenant. Confirme ambos os campos por GET após o PATCH. Não faça edição
+direta no banco nem reimporte produtos para corrigir o endereço.
+
+### Publicação
+
 Cada ambiente usa seu projeto Vercel compartilhado. Nenhum projeto ou build é
 criado por cliente. O orquestrador aceita somente um deployment `READY` ligado
 a `grupounico/unicommerce:main` cujo `githubCommitSha` seja igual ao SHA atual
