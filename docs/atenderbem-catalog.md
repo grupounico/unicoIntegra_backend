@@ -5,10 +5,10 @@ A etapa final funciona em implantações completas, Hub e Banco Único e registr
 ## Implantação
 
 1. Aplicar `prisma migrate deploy` (migration 20261007180000_add_atenderbem_configuration) e gerar o Prisma Client.
-2. Configurar DEPLOYMENT_ENCRYPTION_KEY, CATALOG_ATENDERBEM_FEED_BASE_URL (URL HTTPS completa do feed, sem query) e as listas de hosts no .env.example. Acrescentar instâncias permitidas a CATALOG_MCP_ALLOWED_HOSTS e hosts do feed a CATALOG_FEED_ALLOWED_HOSTS. CATALOG_UPLOAD_ALLOWED_HOSTS só é necessário se o armazenamento não estiver na mesma origem do MCP.
+2. Configurar DEPLOYMENT_ENCRYPTION_KEY, CATALOG_ATENDERBEM_FEED_BASE_URL (URL HTTPS completa do feed, sem query) e as listas de hosts no .env.example. Use `*.atenderbem.com` em CATALOG_MCP_ALLOWED_HOSTS para aceitar automaticamente as instâncias de clientes do AtenderBem; hosts exatos continuam aceitos. Acrescente hosts do feed a CATALOG_FEED_ALLOWED_HOSTS. CATALOG_UPLOAD_ALLOWED_HOSTS só é necessário se o armazenamento não estiver na mesma origem do MCP.
 3. Publicar o backend antes do frontend. O navegador envia o Bearer da sessão já criada pelo login do Integra. O backend valida esse token na autoridade fixa do login, por uma leitura autenticada de URAs; sessão inválida, indisponibilidade ou resposta inesperada bloqueiam a operação. Não é preciso informar ADMIN_API_KEY nas telas. X-API-Key permanece opcional para compatibilidade de clientes de API; nunca é embutida no frontend.
 
-Somente hosts explicitamente liberados podem receber as credenciais MCP. Para a instância Drogasara, acrescentar `drogasara.atenderbem.com` a CATALOG_MCP_ALLOWED_HOSTS, preservando os outros destinos; não usar wildcard. O MCP é conferido antes de baixar o CSV. Falhas de conexão preservam as chaves cifradas. A tela informa “chave salva” e aceita campos vazios para mantê-las, inclusive quando a URL HTTPS foi digitada com porta explícita 443.
+Somente hosts cobertos pela política configurada podem receber as credenciais MCP. O padrão `*.atenderbem.com` aceita qualquer subdomínio real do AtenderBem sem liberar o domínio raiz, domínios parecidos ou destinos externos; também é possível listar hosts exatos separados por vírgula. O MCP é conferido antes de baixar o CSV. Falhas de conexão preservam as chaves cifradas. A tela informa “chave salva” e aceita campos vazios para mantê-las, inclusive quando a URL HTTPS foi digitada com porta explícita 443.
 
 O parâmetro unidadeId vem exclusivamente de hubSellerUnitId da unidade selecionada. A URL é montada no servidor a partir do ambiente. Credenciais MCP e feed são cifradas e não retornam nas consultas. Os campos vazios preservam credenciais salvas; mudar endereço/autenticação exige nova credencial.
 
@@ -116,7 +116,8 @@ na fila desde a preparação bloqueia ativação; não se sobrescreve silenciosa
   chave MCP, não entra em localStorage e não é embutida no build.
 - MCP usa a credencial cifrada existente (`DEPLOYMENT_ENCRYPTION_KEY`). A credencial
   da referência unicodev não está nos templates nem no repositório.
-- Incluir **explicitamente** os hosts de destino em `CATALOG_MCP_ALLOWED_HOSTS`.
+- Restringir `CATALOG_MCP_ALLOWED_HOSTS` a hosts exatos ou ao padrão seguro
+  `*.atenderbem.com`; `*` isolado não é aceito.
   URLs MCP exigem HTTPS, porta padrão, `/mcp`, sem usuário, senha, query ou fragmento.
 - A conta MCP precisa ler capabilities, modelos, filas, grupos, forms, pipelines,
   stages, assistants e automations; criar forms/pipelines/stages/assistants/automations;

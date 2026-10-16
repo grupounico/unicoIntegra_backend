@@ -243,6 +243,13 @@ test('preserves unicodev lookup and URA topology instead of compensating for a p
 test('MCP accepts explicit record schemas but blocks unknown fields and unsafe origins', () => {
   validateArguments({ type: 'object', properties: { advanced: { type: 'object', additionalProperties: {} } } }, { advanced: { forms: [1] } });
   assert.throws(() => validateArguments({ type: 'object', properties: {} }, { invented: true }));
+  const wildcard = { CATALOG_MCP_ALLOWED_HOSTS: '*.atenderbem.com' };
+  assert.equal(allowedUrl('https://cliente-padrao.atenderbem.com/mcp', 'mcp', {}), 'https://cliente-padrao.atenderbem.com/mcp');
+  assert.equal(allowedUrl('https://superpopular.atenderbem.com:443/mcp', 'mcp', wildcard), 'https://superpopular.atenderbem.com/mcp');
+  assert.equal(allowedUrl('https://novo-cliente.atenderbem.com/mcp', 'mcp', wildcard), 'https://novo-cliente.atenderbem.com/mcp');
+  for (const url of ['https://atenderbem.com/mcp', 'https://notatenderbem.com/mcp', 'https://atenderbem.com.evil.test/mcp', 'https://cliente.atenderbem.com.evil.test/mcp']) {
+    assert.throws(() => allowedUrl(url, 'mcp', wildcard));
+  }
   for (const url of ['https://target.example.com:444/mcp', 'https://target.example.com/mcp?key=x']) assert.throws(() => allowedUrl(url, 'mcp', { CATALOG_MCP_ALLOWED_HOSTS: 'target.example.com' }));
   assert.throws(() => unwrap({ isError: true, content: [{ text: 'Limite contratado excedido' }] }), { code: 'MCP_QUOTA_EXCEEDED', definitive: true });
 });

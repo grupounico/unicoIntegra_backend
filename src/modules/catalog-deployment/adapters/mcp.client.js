@@ -13,12 +13,22 @@ export const TOOL_NAMES = ['product_groups_create', 'files_create_upload_url', '
   'queues_list', 'queues_get', 'queues_update', 'product_groups_get', 'pipelines_list', 'pipelines_get', 'pipelines_create', 'pipelines_update',
   'pipeline_stages_list', 'pipeline_stages_get', 'pipeline_stages_create', 'pipeline_stages_update', 'forms_list', 'forms_get', 'forms_create'];
 
+function hostMatchesPattern(hostname, rawPattern) {
+  const host = String(hostname || '').trim().toLowerCase();
+  const pattern = String(rawPattern || '').trim().toLowerCase();
+  if (!host || !pattern) return false;
+  if (!pattern.startsWith('*.')) return host === pattern;
+  const suffix = pattern.slice(2);
+  return Boolean(suffix) && host !== suffix && host.endsWith(`.${suffix}`);
+}
+
 export function allowedUrl(raw, kind, environment = process.env) {
   let url;
   try { url = new URL(raw); } catch { throw new LabError('Informe uma URL HTTPS válida.'); }
   const hosts = String(environment[kind === 'mcp' ? 'CATALOG_MCP_ALLOWED_HOSTS' : 'CATALOG_FEED_ALLOWED_HOSTS'] ||
-    (kind === 'mcp' ? 'ambientesdetesteunicocontato.atenderbem.com' : 'unicocontato.tech')).split(',').map(x => x.trim());
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.port && url.port !== '443') || !hosts.includes(url.hostname)) {
+    (kind === 'mcp' ? '*.atenderbem.com' : 'unicocontato.tech')).split(',').map(x => x.trim()).filter(Boolean);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || (url.port && url.port !== '443')
+      || !hosts.some(pattern => hostMatchesPattern(url.hostname, pattern))) {
     throw new LabError(`Destino não permitido para ${kind}. Solicite a liberação deste host no backend; as chaves salvas foram preservadas.`, 403, 'ATENDERBEM_DESTINATION_NOT_ALLOWED');
   }
   if (kind === 'mcp' && url.pathname.replace(/\/$/, '') !== '/mcp') throw new LabError('A URL do MCP deve terminar em /mcp.');
