@@ -16,6 +16,15 @@ function checkDestination(state, unit) {
   }
 }
 
+async function validateAssistantMessageLimit(call, id, expectedLimit) {
+  const assistant = await call('assistants_get', { id });
+  if (Number(assistant?.id) !== id) fail('ATENDERBEM_ASSISTANT_MISMATCH', 'O MCP não retornou o assistente desta instalação.');
+  const limit = Number(assistant.msgslimit);
+  if (!Number.isSafeInteger(limit) || limit <= 0 || (expectedLimit !== undefined && limit !== expectedLimit)) {
+    fail('ATENDERBEM_ASSISTANT_MESSAGE_LIMIT_INVALID', 'O limite de mensagens do assistente está ausente, zerado ou não foi salvo corretamente. Configure um limite positivo no AtenderBem antes de vincular a fila.');
+  }
+}
+
 // Dependencies are explicit so tests never import the app, start workers, or open a database.
 export function assistantInstaller({ database, makeClient, decrypt, targets }) {
   async function load(deploymentId, unitId) {
@@ -69,7 +78,7 @@ export function assistantInstaller({ database, makeClient, decrypt, targets }) {
     if (!Object.hasOwn(models.models || {}, config.modelId)) fail('ATENDERBEM_MODEL_UNAVAILABLE', 'Modelo indisponível nesta instância.');
     const group = await call('product_groups_get', { id: config.groupId });
     if (Number(group?.id) !== config.groupId) fail('ATENDERBEM_GROUP_INVALID', 'O grupo de produtos não existe nesta instância.');
-    const required = ['automations_validate_elements', 'queues_update', ...installationSteps(unitId, config).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
+    const required = ['automations_validate_elements', 'queues_update', 'assistants_get', ...installationSteps(unitId, config).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
     const names = new Set(tools.map(tool => tool.name.replace(/^mcp__omni__/, '')));
     for (const tool of required) if (!names.has(tool)) fail('ATENDERBEM_CAPABILITY_MISSING', `A instância não oferece ${tool}.`, 422);
     return save(unit, { status: 'prepared', config, ids: {}, steps: [], queueBefore: snapshot(queue), createdAt: now(), lastError: null }, 'atenderbem_assistant_prepared');
@@ -119,6 +128,7 @@ export function assistantInstaller({ database, makeClient, decrypt, targets }) {
         sent = true;
         // Updating our own resource with the same payload is repeatable after an ambiguous response.
         await call(step.update, step.args);
+        if (step.key === 'assistantConfigured') await validateAssistantMessageLimit(call, state.ids.assistant, step.args.msgslimit);
       }
       state.steps.push(step.key);
       state.status = state.steps.length === installationSteps(unitId, state.config, state.ids).length ? 'ready' : 'prepared';
@@ -144,6 +154,8 @@ export function assistantInstaller({ database, makeClient, decrypt, targets }) {
     if (!['ready', 'activation_unknown'].includes(state?.status) && !interrupted) fail('ATENDERBEM_ASSISTANT_NOT_READY', 'Conclua todas as etapas antes de vincular a fila. Se a vinculação estiver em andamento, aguarde dois minutos.');
     checkDestination(state, unit);
     const { call } = await connection(unit);
+    // Recheck legacy installations and edits made after preparation, before any queue write.
+    await validateAssistantMessageLimit(call, state.ids.assistant);
     const queue = await call('queues_get', { id: state.config.queueId });
     if (!queue?.enabled) fail('ATENDERBEM_QUEUE_DISABLED', 'Conecte/habilite a fila no AtenderBem antes de vinculá-la.');
     const payload = queuePayload(state.config, state.ids);

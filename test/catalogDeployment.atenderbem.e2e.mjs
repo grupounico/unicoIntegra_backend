@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // Dedicated loopback-only database. Run the catalog E2E first to seed a deployment.
-process.env.DATABASE_URL = 'postgresql://postgres:catalog_test@127.0.0.1:55432/unico_integra_test';
+process.env.DATABASE_URL = process.env.CATALOG_E2E_DATABASE_URL || 'postgresql://postgres:catalog_test@127.0.0.1:55432/unico_integra_test';
+const testDatabase = new URL(process.env.DATABASE_URL);
+assert.ok(['127.0.0.1', 'localhost'].includes(testDatabase.hostname) && testDatabase.pathname === '/unico_integra_test', 'E2E requires a dedicated loopback test database');
 process.env.DEPLOYMENT_ENCRYPTION_KEY = Buffer.alloc(32, 4).toString('base64');
 const { prisma } = await import('../prisma/PrismaClient.js');
 const { encryptSecret, decryptSecret } = await import('../src/modules/catalog-deployment/crypto.js');
@@ -31,7 +33,7 @@ try {
   } });
   const resources = []; const calls = []; let sequence = 100; let failLookup = true;
   const queue = { id: 10, type: 23, enabled: 1, ivrid: 99, productgroups: [], syncedcartchangeautomation: 0 };
-  const names = ['config_capabilities', 'automations_validate_elements', 'queues_update', ...installationSteps(unit.id, { ...input, version: 1 }).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
+  const names = ['config_capabilities', 'automations_validate_elements', 'queues_update', 'assistants_get', ...installationSteps(unit.id, { ...input, version: 1 }).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
   const client = { tools: async () => names.map(name => ({ name })), call: async (name, args = {}) => {
     calls.push(name);
     if (name === 'config_capabilities') return {};
@@ -39,6 +41,7 @@ try {
     if (name === 'product_groups_get') return { id: 7 };
     if (name === 'queues_get') return structuredClone(queue);
     if (name === 'queues_update') { Object.assign(queue, args); return {}; }
+    if (name === 'assistants_get') return structuredClone(resources.find(r => r.id === args.id));
     if (name === 'automations_validate_elements') return { valid: true };
     if (name.endsWith('_list')) return resources.filter(r => name === r.kind + '_list');
     if (name.endsWith('_create')) {
@@ -65,6 +68,7 @@ try {
   for (const [key, value] of Object.entries(savedIds)) assert.equal(state.ids[key], value);
   assert.equal(calls.filter(name => name === 'automations_create').length, 2); // lookup + URA, no duplicate
   assert.equal(queue.ivrid, 99);
+  assert.equal(resources.find(r => r.id === state.ids.assistant).msgslimit, 200);
   const publicDeployment = await getDeployment(unit.deploymentId);
   assert.equal(publicDeployment.units.some(u => 'atenderBemSecretsEncrypted' in u), false);
   assert.equal(JSON.stringify(publicDeployment).includes('isolated-not-real'), false);

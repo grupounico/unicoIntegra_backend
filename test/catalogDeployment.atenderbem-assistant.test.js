@@ -11,8 +11,8 @@ function fixture() {
     atenderBemConfig: { mcpUrl: 'https://target.example.com/mcp', groupId: 7, import: { status: 'completed' } } };
   const calls = []; const resources = {}; let seq = 100;
   const queue = { id: 10, name: 'Destino', type: 21, enabled: 1, ivrid: 0, productgroups: [], syncedcartchangeautomation: 0 };
-  const toolNames = ['config_capabilities', 'automations_validate_elements', 'queues_update', ...installationSteps(unit.id, { ...input, version: 1 }).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
-  const control = { fail: null, delay: null };
+  const toolNames = ['config_capabilities', 'automations_validate_elements', 'queues_update', 'assistants_get', ...installationSteps(unit.id, { ...input, version: 1 }).flatMap(s => s.create ? [s.create, s.list] : [s.update])];
+  const control = { fail: null, delay: null, dropMessageLimit: false };
   const client = { tools: async () => toolNames.map(name => ({ name })), call: async (name, args = {}) => {
     calls.push({ name, args });
     if (control.delay) await control.delay(name, args);
@@ -22,10 +22,15 @@ function fixture() {
     if (name === 'product_groups_get') return { id: 7 };
     if (name === 'queues_get') return structuredClone(queue);
     if (name === 'queues_update') { Object.assign(queue, args); return queue; }
+    if (name === 'assistants_get') return structuredClone(resources[args.id]);
     if (name === 'automations_validate_elements') return { valid: true, elementCount: 5 };
     if (name.endsWith('_list')) return Object.values(resources).filter(r => name === `${r.kind}_list`);
     if (name.endsWith('_create')) { const item = { ...args, id: ++seq, kind: name.replace(/_create$/, '') }; resources[item.id] = item; return { id: item.id }; }
-    if (name.endsWith('_update')) { Object.assign(resources[args.id], args); return { id: args.id }; }
+    if (name.endsWith('_update')) {
+      Object.assign(resources[args.id], args);
+      if (name === 'assistants_update' && control.dropMessageLimit) resources[args.id].msgslimit = 0;
+      return { id: args.id };
+    }
     throw new Error(`Unexpected tool ${name}`);
   } };
   const database = { clientDeploymentUnit: { findFirst: async () => structuredClone(unit), updateMany: async ({ where, data }) => {
@@ -51,8 +56,43 @@ test('installs once, persists every ID, does not activate or poll in background'
   assert.equal(payload.functions[0].endsturn, 0);
   assert.equal(payload.transferresult, 0);
   assert.equal(payload.terminateresult, 0);
+  assert.equal(payload.msgslimit, 200);
   assert.equal(payload.functions[0].automation, state.ids.lookup);
   assert.deepEqual(payload.productsgroups, [7]); assert.equal(payload.presets.length, 0);
+});
+test('HTTP success without persisted message limit fails the step and retry reuses the assistant', async () => {
+  const f = fixture(); await prepare(f);
+  f.control.dropMessageLimit = true;
+  for (let i = 0; i < 9; i++) await f.service.next('deployment-test', 'unit-test');
+  const failed = f.state();
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.lastError.code, 'ATENDERBEM_ASSISTANT_MESSAGE_LIMIT_INVALID');
+  assert.equal(failed.steps.includes('assistantConfigured'), false);
+  const assistantId = failed.ids.assistant;
+  f.control.dropMessageLimit = false;
+  await f.service.next('deployment-test', 'unit-test');
+  await f.service.next('deployment-test', 'unit-test');
+  assert.equal(f.state().status, 'ready');
+  assert.equal(f.state().ids.assistant, assistantId);
+  assert.equal(f.resources[assistantId].msgslimit, 200);
+  assert.equal(f.calls.filter(c => c.name === 'assistants_create').length, 1);
+  assert.equal(f.calls.filter(c => c.name === 'queues_update').length, 0);
+});
+for (const limit of [0, null, undefined, -1, 1.5]) {
+  test(`activation refuses invalid message limit (${limit}) without modifying the queue`, async () => {
+    const f = fixture(); await complete(f);
+    f.resources[f.state().ids.assistant].msgslimit = limit;
+    await assert.rejects(f.service.activate('deployment-test', 'unit-test', { confirm: true, confirmHumanTeam: true }), { code: 'ATENDERBEM_ASSISTANT_MESSAGE_LIMIT_INVALID' });
+    assert.equal(f.state().status, 'ready');
+    assert.equal(f.calls.filter(c => c.name === 'queues_update').length, 0);
+  });
+}
+test('activation preserves a positive message limit deliberately customized by the operator', async () => {
+  const f = fixture(); await complete(f);
+  f.resources[f.state().ids.assistant].msgslimit = 100;
+  await f.service.activate('deployment-test', 'unit-test', { confirm: true, confirmHumanTeam: true });
+  assert.equal(f.state().status, 'active');
+  assert.equal(f.resources[f.state().ids.assistant].msgslimit, 100);
 });
 test('concurrent starts claim a single creation', async () => {
   const f = fixture(); await prepare(f);

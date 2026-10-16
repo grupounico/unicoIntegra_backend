@@ -134,6 +134,21 @@ Respostas não contêm chaves MCP. GET é pontual; não inicia trabalho em segun
 
 ## Limites de aceite — não confundir vinculação com homologação
 
+O template WhatsApp envia `msgslimit: 200` na etapa de configuração do assistente.
+Embora o schema MCP descreva zero como ilimitado, o instalador adota um limite
+finito explícito; não depende do default remoto nem interpreta zero como prova
+da causa de uma falha de atendimento.
+`assistants_create` aceita somente o nome; por isso o limite é aplicado por
+`assistants_update` e confirmado por `assistants_get` antes de concluir a etapa.
+Um HTTP de sucesso com limite ausente, zero ou divergente não é suficiente.
+O retry repete a configuração do mesmo ID, sem criar outro assistente.
+
+Antes de vincular a fila, o instalador consulta novamente o limite e exige um
+inteiro positivo. Limites positivos ajustados pelo operador são preservados.
+Para assistentes antigos já instalados com zero, corrija apenas `msgslimit` no
+assistente/instância correspondente e confirme por leitura; não recrie CRM, URA
+ou grupo de produtos. Essa correção não muda a quantidade contratada de assistentes.
+
 Esta versão instala assistente, busca, URA, formulário e CRM; **não substitui os
 webhooks do tenant** nem clona automaticamente as automações 10/11/17/18/21/22/23/24.
 Em especial, a automação 22 da referência usa template WhatsApp ID 2, e o serviço
