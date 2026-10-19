@@ -140,8 +140,10 @@ até 30 segundos.
 
 ## Rollback da aplicação
 
-As migrations desta entrega apenas adicionam tabelas e colunas. A versão anterior
-do backend pode continuar operando com elas presentes.
+Consulte `CATALOGO_RELEASE_PRODUCAO.md` para a cadeia atual. Além de novas colunas,
+a release dos quatro ERPs permite origem nula para Linx e troca a unicidade global
+por um índice parcial Alpha7. Preserve essas alterações ao voltar a aplicação e
+revise os jobs dos novos ERPs antes de reativar um worker antigo.
 
 ~~~bash
 docker compose down

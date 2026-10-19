@@ -1,0 +1,22 @@
+services:
+  catalog-staging-postgres:
+    image: postgres:16-alpine
+    container_name: unico-catalog-staging-local-postgres
+    env_file:
+      - .env.catalog-postgres.local
+    environment:
+      POSTGRES_DB: unico_catalog_staging_local
+    ports:
+      - 127.0.0.1:15439:5432
+    volumes:
+      - catalog-staging-postgres-data:/var/lib/postgresql/data
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  catalog-staging-postgres-data:
+    name: unico-catalog-staging-local-postgres-data

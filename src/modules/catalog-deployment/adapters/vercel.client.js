@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { DeploymentError, mapUpstreamError } from '../errors.js';
 import { withRetry } from './http.js';
+import { localStorefrontProbe } from './local-storefront.js';
 
 function client(target) {
   if (!target?.apiToken || !target?.teamId || !target?.projectId) {
@@ -239,15 +240,18 @@ export async function ensureProjectAlias(target, domain, unitId, expectedSha) {
 }
 
 export async function validateStorefrontIdentity(storefrontTarget, domain, tenantId, unitId) {
+  const local = storefrontTarget.driver === 'local' ? localStorefrontProbe(storefrontTarget, domain, unitId) : null;
+  const origin = local?.origin || `https://${domain}`;
   const timeoutMs = Math.max(5000, Number(storefrontTarget.healthTimeoutMs || 60000));
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
     try {
-      const response = await axios.get(`https://${domain}/api/storefront/identity`, {
+      const response = await axios.get(`${origin}/api/storefront/identity`, {
         timeout: Math.min(10000, Math.max(1000, deadline - Date.now())),
         maxRedirects: 0,
-        headers: { Accept: 'application/json' },
+        headers: { Accept: 'application/json', ...local?.headers },
+        ...(local ? { proxy: false } : {}),
       });
       if (response.data?.tenantId !== tenantId || response.data?.domain !== domain || response.data?.status !== 'active') {
         throw new DeploymentError('DOMAIN_TENANT_MISMATCH', 'O domínio respondeu com outro tenant.', {
@@ -263,9 +267,10 @@ export async function validateStorefrontIdentity(storefrontTarget, domain, tenan
           action: 'Revise o branding desktop/mobile configurado para o tenant.',
         });
       }
-      const catalog = await axios.get(`https://${domain}/api/catalog/products`, {
+      const catalog = await axios.get(`${origin}/api/catalog/products`, {
         timeout: Math.min(10000, Math.max(1000, deadline - Date.now())), maxRedirects: 0,
-        headers: { Accept: 'application/json' }, params: { page: 1, pageSize: 50, minimumProducts: 20, maximumProducts: 50 },
+        headers: { Accept: 'application/json', ...local?.headers }, params: { page: 1, pageSize: 50, minimumProducts: 20, maximumProducts: 50 },
+        ...(local ? { proxy: false } : {}),
       });
       const products = Array.isArray(catalog.data?.data) ? catalog.data.data : [];
       const sellable = products.filter((product) => Number(product.price) > 0 && Number(product.stock) > 0).length;

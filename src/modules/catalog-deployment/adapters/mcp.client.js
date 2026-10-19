@@ -1,4 +1,5 @@
 import { DeploymentError } from '../errors.js';
+import { isLocalAtenderBemFeedAllowed } from '../atenderbem-url-policy.js';
 // Only curated diagnostic messages; upstream bodies and credentials stay private.
 export class LabError extends DeploymentError {
   constructor(message, status = 400, code = 'ATENDERBEM_CONNECTION_ERROR', httpStatus = null) {
@@ -16,6 +17,7 @@ export const TOOL_NAMES = ['product_groups_create', 'files_create_upload_url', '
 export function allowedUrl(raw, kind, environment = process.env) {
   let url;
   try { url = new URL(raw); } catch { throw new LabError('Informe uma URL HTTPS válida.'); }
+  if (kind === 'feed' && isLocalAtenderBemFeedAllowed(url.toString(), environment)) return url.toString();
   // Every direct AtenderBem tenant is supported; the environment only adds custom MCP hosts.
   const atenderBemTenant = kind === 'mcp' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atenderbem\.com$/.test(url.hostname);
   const hosts = String(environment[kind === 'mcp' ? 'CATALOG_MCP_ALLOWED_HOSTS' : 'CATALOG_FEED_ALLOWED_HOSTS'] ||

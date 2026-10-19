@@ -1,11 +1,13 @@
 import { DeploymentError } from './errors.js';
+import { isLocalAtenderBemFeedAllowed } from './atenderbem-url-policy.js';
 
 function invalid(message) {
   throw new DeploymentError('ATENDERBEM_CONFIG_INVALID', message, { statusCode: 400, stage: 'atenderbem_configuration' });
 }
-function httpsUrl(value, label, mcp = false) {
+function httpsUrl(value, label, mcp = false, environment = process.env) {
   let url;
   try { url = new URL(String(value || '').trim()); } catch { invalid(`Informe uma URL válida para ${label}.`); }
+  if (!mcp && isLocalAtenderBemFeedAllowed(url.toString(), environment)) return url.toString();
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.toString().length > 2048) invalid(`Use uma URL HTTPS para ${label}, sem credenciais ou parâmetros.`);
   if (mcp && url.pathname.replace(/\/$/, '') !== '/mcp') invalid('A URL do MCP deve terminar em /mcp.');
   return url.toString();
@@ -14,7 +16,7 @@ export function getAtenderBemSettings(environment = process.env) {
   if (!environment.CATALOG_ATENDERBEM_FEED_BASE_URL?.trim()) {
     throw new DeploymentError('ATENDERBEM_FEED_NOT_CONFIGURED', 'Configure CATALOG_ATENDERBEM_FEED_BASE_URL no backend.', { statusCode: 503 });
   }
-  return { feedBaseUrl: httpsUrl(environment.CATALOG_ATENDERBEM_FEED_BASE_URL, 'o feed'), feedUnitIdSource: 'hubSellerUnitId' };
+  return { feedBaseUrl: httpsUrl(environment.CATALOG_ATENDERBEM_FEED_BASE_URL, 'o feed', false, environment), feedUnitIdSource: 'hubSellerUnitId' };
 }
 export function feedIdFromUnit(unit) {
   const id = Number(unit?.hubSellerUnitId);
@@ -23,10 +25,10 @@ export function feedIdFromUnit(unit) {
   }
   return id;
 }
-export function buildFeedUrl(feedBaseUrl, feedUnitId) {
+export function buildFeedUrl(feedBaseUrl, feedUnitId, environment = process.env) {
   const unitId = Number(feedUnitId);
   if (!Number.isSafeInteger(unitId) || unitId <= 0) invalid('A unidade ainda não possui um ID válido para o feed.');
-  const url = new URL(httpsUrl(feedBaseUrl, 'o feed'));
+  const url = new URL(httpsUrl(feedBaseUrl, 'o feed', false, environment));
   url.searchParams.set('unidadeId', String(unitId));
   return url.toString();
 }
@@ -63,6 +65,8 @@ export function preserveAtenderBemProgress(config, previous, secrets, previousSe
   config.groupId = previous.groupId;
   config.groupMode = 'existing';
   config.status = previous.status === 'group_ready' ? 'group_ready' : 'configured';
+  const sameDestination = ['mcpUrl', 'groupId', 'feedBaseUrl', 'feedUnitId', 'feedAuth'].every(key => config[key] === previous[key]);
+  if (sameDestination && previous.ai) config.ai = previous.ai;
   const sameFeed = ['feedBaseUrl', 'feedUnitId', 'feedAuth'].every(key => config[key] === previous[key]) && secrets.feedKey === previousSecrets.feedKey;
   if (sameFeed && previous.import) config.import = previous.import;
   if (previous.previousImport) config.previousImport = previous.previousImport;

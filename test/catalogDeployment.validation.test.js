@@ -27,7 +27,93 @@ test('preserva o slug explícito do tenant', () => { const value = payload(); va
 test('gate de cobertura rejeita 94,99% e aceita 95%', () => { assert.equal(meetsCoverageGate(94.99), false); assert.equal(meetsCoverageGate(95), true); });
 test('aplica defaults e escolhe a primeira unidade', () => { const value = validateCreatePayload(payload()); assert.equal(value.units[0].initial, true); assert.equal(value.units[0].publicationMode, 'automatic'); assert.equal(value.units[0].pageSize, 500); assert.equal(value.units[0].validEanDropThresholdBps, 1000); });
 test('aceita a arroba do setup e persiste somente o username', () => { const value = payload(); value.group.username = '@rede-saude'; assert.equal(validateCreatePayload(value).group.username, 'rede-saude'); });
-test('rejeita provider ainda não suportado', () => { const value = payload(); value.units[0].provider = 'trier'; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'UNSUPPORTED_PROVIDER'); });
+test('mantém compatibilidade com provider alpha7 e devolve erpId canônico', () => {
+  const value = payload(); value.units[0].provider = 'alpha7';
+  const unit = validateCreatePayload(value).units[0];
+  assert.equal(unit.erpId, 1); assert.equal(unit.provider, 'alpha7');
+});
+test('rejeita ERP ainda não suportado', () => { const value = payload(); value.units[0].provider = 'trier'; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'UNSUPPORTED_ERP'); });
+test('exige erpId canônico para Linx', () => { const value = payload(); value.units[0].provider = 'linx'; delete value.units[0].sourceUnitId; delete value.units[0].credentialRef; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'UNSUPPORTED_ERP'); });
+test('rejeita erpId inválido ou divergente do provider', () => {
+  const invalid = payload(); invalid.units[0].erpId = 99;
+  assert.throws(() => validateCreatePayload(invalid), (error) => error.code === 'UNSUPPORTED_ERP');
+  const mismatch = payload(); mismatch.units[0].erpId = 2; mismatch.units[0].provider = 'alpha7';
+  assert.throws(() => validateCreatePayload(mismatch), (error) => error.code === 'UNSUPPORTED_ERP');
+});
+test('normaliza Linx sem ID ou credencial e fixa o modo shadow', () => {
+  const value = payload();
+  value.units[0].erpId = 2;
+  delete value.units[0].sourceUnitId;
+  delete value.units[0].credentialRef;
+  value.units[0].pageSize = 100;
+  value.units[0].validEanDropThresholdBps = 12;
+  const unit = validateCreatePayload(value).units[0];
+  assert.deepEqual({ erpId: unit.erpId, provider: unit.provider, sourceUnitId: unit.sourceUnitId, credentialRef: unit.credentialRef, publicationMode: unit.publicationMode, pageSize: unit.pageSize, threshold: unit.validEanDropThresholdBps }, {
+    erpId: 2, provider: 'linx', sourceUnitId: null, credentialRef: null, publicationMode: 'shadow', pageSize: 500, threshold: 1000,
+  });
+});
+test('Linx proíbe sourceUnitId e credentialRef', () => {
+  const withSource = payload(); withSource.units[0].erpId = 2; delete withSource.units[0].credentialRef;
+  assert.throws(() => validateCreatePayload(withSource), (error) => error.code === 'LINX_SOURCE_UNIT_FORBIDDEN');
+  const withCredential = payload(); withCredential.units[0].erpId = 2; delete withCredential.units[0].sourceUnitId;
+  assert.throws(() => validateCreatePayload(withCredential), (error) => error.code === 'LINX_CREDENTIAL_FORBIDDEN');
+});
+test('Automatiza exige conexão MySQL e shop_id e preserva opções operacionais', () => {
+  const value = payload();
+  Object.assign(value.units[0], { erpId: 3, credentialRef: 'mysql://user:pass@db.example:3306/client?ssl=true', pageSize: 250, validEanDropThresholdBps: 750 });
+  const unit = validateCreatePayload(value).units[0];
+  assert.equal(unit.provider, 'automatiza');
+  assert.equal(unit.publicationMode, 'shadow');
+  assert.equal(unit.pageSize, 250);
+  assert.equal(unit.validEanDropThresholdBps, 750);
+  delete value.units[0].sourceUnitId;
+  assert.throws(() => validateCreatePayload(value), { code: 'INVALID_SOURCE_UNIT_ID' });
+  value.units[0].sourceUnitId = 1;
+  value.units[0].credentialRef = 'postgresql://user:pass@db.example/client';
+  assert.throws(() => validateCreatePayload(value), { code: 'INVALID_CREDENTIAL_REF' });
+  value.units[0].credentialRef = 'mysql://user:pass@db.example/client?ssl=prefer';
+  assert.throws(() => validateCreatePayload(value), { code: 'INVALID_CREDENTIAL_REF' });
+});
+test('Vetor exige cdFilial e API key write-only normalizada sem campo extra', () => {
+  const value = payload();
+  delete value.units[0].credentialRef;
+  Object.assign(value.units[0], { erpId: 4, vetorApiKey: '  test-vetor-key  ' });
+  const unit = validateCreatePayload(value).units[0];
+  assert.equal(unit.provider, 'vetor');
+  assert.equal(unit.credentialRef, 'test-vetor-key');
+  assert.equal(Object.hasOwn(unit, 'vetorApiKey'), false);
+  assert.equal(unit.publicationMode, 'shadow');
+  value.units[0].credentialRef = 'secret://vetor/manual';
+  assert.throws(() => validateCreatePayload(value), { code: 'ERP_CREDENTIAL_FORBIDDEN' });
+  delete value.units[0].credentialRef;
+  value.units[0].vetorApiKey = 'short';
+  assert.throws(() => validateCreatePayload(value), { code: 'INVALID_VETOR_API_KEY' });
+});
+test('permite IDs de filial iguais em origens Automatiza e Vetor diferentes', () => {
+  for (const erpId of [3, 4]) {
+    const value = payload();
+    const first = { ...value.units[0], erpId };
+    if (erpId === 3) first.credentialRef = 'mysql://user:pass@first.example/client';
+    else { delete first.credentialRef; first.vetorApiKey = 'first-vetor-key'; }
+    const second = { ...first, codigo: 'FILIAL', cnpj: '45.723.174/0001-10' };
+    if (erpId === 3) second.credentialRef = 'mysql://user:pass@second.example/client';
+    else second.vetorApiKey = 'second-vetor-key';
+    value.units = [first, second];
+    assert.deepEqual(validateCreatePayload(value).units.map((unit) => unit.sourceUnitId), [1, 1]);
+  }
+});
+test('rejeita segredo Vetor em outros ERPs e campos da origem em Linx', () => {
+  const value = payload(); value.units[0].vetorApiKey = 'test-vetor-key';
+  assert.throws(() => validateCreatePayload(value), { code: 'ERP_CREDENTIAL_FORBIDDEN' });
+  assert.throws(() => validateUnitUpdatePayload({ vetorApiKey: 'test-vetor-key' }, 'linx'), { code: 'ERP_CREDENTIAL_FORBIDDEN' });
+  assert.throws(() => validateUnitUpdatePayload({ sourceUnitId: 1 }, 'linx'), { code: 'LINX_SOURCE_UNIT_FORBIDDEN' });
+});
+test('edição usa o provider persistido para MySQL e API key Vetor', () => {
+  assert.deepEqual(validateUnitUpdatePayload({ credentialRef: 'mysql://user:pass@db.example/client' }, 'automatiza'), { credentialRef: 'mysql://user:pass@db.example/client' });
+  assert.deepEqual(validateUnitUpdatePayload({ vetorApiKey: 'test-vetor-key' }, 'vetor'), { credentialRef: 'test-vetor-key' });
+  assert.throws(() => validateUnitUpdatePayload({ credentialRef: 'postgresql://user:pass@db.example/client' }, 'vetor'), { code: 'ERP_CREDENTIAL_FORBIDDEN' });
+  assert.throws(() => validateUnitUpdatePayload({ credentialRef: 'postgresql://user:pass@db.example/client' }, 'automatiza'), { code: 'INVALID_CREDENTIAL_REF' });
+});
 test('rejeita sourceUnitId duplicado', () => { const value = payload(); value.units.push({ ...value.units[0], codigo: 'NORTE', cnpj: '45.723.174/0001-10' }); assert.throws(() => validateCreatePayload(value), (error) => error.code === 'DUPLICATE_SOURCE_UNIT_ID'); });
 test('aceita sourceUnitId maior que o limite de INTEGER do PostgreSQL', () => { const value = payload(); value.units[0].sourceUnitId = 50003840493; assert.equal(validateCreatePayload(value).units[0].sourceUnitId, 50003840493); });
 test('rejeita sourceUnitId fora da faixa segura do JavaScript', () => { const value = payload(); value.units[0].sourceUnitId = Number.MAX_SAFE_INTEGER + 1; assert.throws(() => validateCreatePayload(value), (error) => error.code === 'INVALID_SOURCE_UNIT_ID'); });

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { DeploymentError } from './errors.js';
+import { CATALOG_ERPS, resolveCatalogErp } from './erp.js';
 
 export const ASSET_TYPES = [
   'banner_1', 'banner_2', 'banner_3',
@@ -89,11 +90,47 @@ function postgresUrl(value, field) {
   return parsed.toString();
 }
 
-export function validateUnitUpdatePayload(payload) {
+function mysqlUrl(value, field) {
+  let parsed;
+  try { parsed = new URL(requiredString(value, field, 2048)); }
+  catch (error) {
+    if (error instanceof DeploymentError) throw error;
+    throw new DeploymentError('INVALID_CREDENTIAL_REF', `${field} deve ser uma conexão MySQL válida.`, { statusCode: 400, stage: 'validation' });
+  }
+  if (parsed.protocol !== 'mysql:' || !parsed.hostname || !parsed.username || !parsed.password || !parsed.pathname.slice(1)
+      || ![null, 'true', 'false'].includes(parsed.searchParams.get('ssl'))) {
+    throw new DeploymentError('INVALID_CREDENTIAL_REF', `${field} deve ser uma conexão MySQL completa; ssl aceita true ou false.`, { statusCode: 400, stage: 'validation' });
+  }
+  return parsed.toString();
+}
+
+function vetorApiKey(value, field) {
+  const key = requiredString(value, field, 2048);
+  if (key.length < 8 || /[\r\n]/.test(key)) throw new DeploymentError('INVALID_VETOR_API_KEY', `${field} deve conter entre 8 e 2048 caracteres, sem quebras de linha.`, { statusCode: 400, stage: 'validation' });
+  return key;
+}
+
+function validateProviderSecret(payload, provider, { required = false, field = '' } = {}) {
+  const prefix = field ? `${field}.` : '';
+  if (provider === 'linx') {
+    if (payload.credentialRef !== undefined && payload.credentialRef !== null && String(payload.credentialRef).trim()) throw new DeploymentError('LINX_CREDENTIAL_FORBIDDEN', 'A integração Linx não aceita credentialRef.', { statusCode: 400, stage: 'validation' });
+    if (payload.vetorApiKey !== undefined) throw new DeploymentError('ERP_CREDENTIAL_FORBIDDEN', 'A integração Linx não aceita API key Vetor.', { statusCode: 400, stage: 'validation' });
+    return null;
+  }
+  if (provider === 'vetor') {
+    if (payload.credentialRef !== undefined) throw new DeploymentError('ERP_CREDENTIAL_FORBIDDEN', 'Informe a API key Vetor em vetorApiKey.', { statusCode: 400, stage: 'validation' });
+    return required || payload.vetorApiKey !== undefined ? vetorApiKey(payload.vetorApiKey, `${prefix}vetorApiKey`) : undefined;
+  }
+  if (payload.vetorApiKey !== undefined) throw new DeploymentError('ERP_CREDENTIAL_FORBIDDEN', 'vetorApiKey é permitido somente para Vetor.', { statusCode: 400, stage: 'validation' });
+  if (!required && payload.credentialRef === undefined) return undefined;
+  return provider === 'automatiza' ? mysqlUrl(payload.credentialRef, `${prefix}credentialRef`) : postgresUrl(payload.credentialRef, `${prefix}credentialRef`);
+}
+
+export function validateUnitUpdatePayload(payload, provider = 'alpha7') {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new DeploymentError('INVALID_INPUT', 'Informe os dados que deseja corrigir.', { statusCode: 400, stage: 'validation' });
   }
-  const allowed = new Set(['codigo', 'nome', 'cnpj', 'sourceUnitId', 'credentialRef', 'orderWebhookUrl', 'pageSize', 'validEanDropThresholdBps', 'requestedBy']);
+  const allowed = new Set(['codigo', 'nome', 'cnpj', 'sourceUnitId', 'credentialRef', 'vetorApiKey', 'orderWebhookUrl', 'pageSize', 'validEanDropThresholdBps', 'requestedBy']);
   const unknown = Object.keys(payload).filter((key) => !allowed.has(key));
   if (unknown.length) {
     throw new DeploymentError('INVALID_INPUT', `Campos não permitidos: ${unknown.join(', ')}.`, { statusCode: 400, stage: 'validation' });
@@ -108,11 +145,13 @@ export function validateUnitUpdatePayload(payload) {
     value.cnpj = cnpj;
   }
   if (payload.sourceUnitId !== undefined) {
+    if (provider === 'linx') throw new DeploymentError('LINX_SOURCE_UNIT_FORBIDDEN', 'A integração Linx não aceita sourceUnitId.', { statusCode: 400, stage: 'validation' });
     const sourceUnitId = Number(payload.sourceUnitId);
     if (!Number.isSafeInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', 'sourceUnitId deve ser um número inteiro positivo válido.', { statusCode: 400, stage: 'validation' });
     value.sourceUnitId = sourceUnitId;
   }
-  if (payload.credentialRef !== undefined) value.credentialRef = postgresUrl(payload.credentialRef, 'credentialRef');
+  const credentialRef = validateProviderSecret(payload, provider);
+  if (credentialRef !== undefined && credentialRef !== null) value.credentialRef = credentialRef;
   if (payload.orderWebhookUrl !== undefined) value.orderWebhookUrl = httpsUrl(payload.orderWebhookUrl, 'orderWebhookUrl');
   if (payload.pageSize !== undefined) {
     const pageSize = Number(payload.pageSize);
@@ -147,19 +186,27 @@ export function validateCreatePayload(payload) {
     codes.add(code.toLowerCase());
     const cnpj = digits(unit.cnpj);
     if (!isValidCnpj(cnpj)) throw new DeploymentError('INVALID_CNPJ', `O CNPJ da unidade ${code} é inválido.`, { statusCode: 400, stage: 'validation' });
-    const sourceUnitId = Number(unit.sourceUnitId);
-    if (!Number.isSafeInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', `sourceUnitId da unidade ${code} deve ser um inteiro positivo válido.`, { statusCode: 400, stage: 'validation' });
-    if (sources.has(sourceUnitId)) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', `sourceUnitId ${sourceUnitId} está duplicado.`, { statusCode: 400, stage: 'validation' });
-    sources.add(sourceUnitId);
-    const credentialRef = postgresUrl(unit.credentialRef, `units[${index}].credentialRef`);
-    const pageSize = unit.pageSize === undefined ? 500 : Number(unit.pageSize);
-    const threshold = unit.validEanDropThresholdBps === undefined ? 1000 : Number(unit.validEanDropThresholdBps);
+    const erp = resolveCatalogErp({ erpId: unit.erpId, provider: unit.provider });
+    if (!erp) throw new DeploymentError('UNSUPPORTED_ERP', `erpId/provider da unidade ${code} é inválido.`, { statusCode: 400, stage: 'validation' });
+    const alpha7 = erp.id === CATALOG_ERPS.ALPHA7.id;
+    let sourceUnitId = null;
+    let credentialRef = null;
+    if (erp.provider !== 'linx') {
+      sourceUnitId = Number(unit.sourceUnitId);
+      if (!Number.isSafeInteger(sourceUnitId) || sourceUnitId <= 0) throw new DeploymentError('INVALID_SOURCE_UNIT_ID', `sourceUnitId da unidade ${code} deve ser um inteiro positivo válido.`, { statusCode: 400, stage: 'validation' });
+      const sourceKey = `${erp.provider}:${sourceUnitId}`;
+      if (alpha7 && sources.has(sourceKey)) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', `sourceUnitId ${sourceUnitId} está duplicado.`, { statusCode: 400, stage: 'validation' });
+      if (alpha7) sources.add(sourceKey);
+    } else if (unit.sourceUnitId !== undefined && unit.sourceUnitId !== null && unit.sourceUnitId !== '') {
+      throw new DeploymentError('LINX_SOURCE_UNIT_FORBIDDEN', `A unidade Linx ${code} não aceita sourceUnitId.`, { statusCode: 400, stage: 'validation' });
+    }
+    credentialRef = validateProviderSecret(unit, erp.provider, { required: true, field: `units[${index}]` });
+    const pageSize = erp.provider !== 'linx' && unit.pageSize !== undefined ? Number(unit.pageSize) : 500;
+    const threshold = erp.provider !== 'linx' && unit.validEanDropThresholdBps !== undefined ? Number(unit.validEanDropThresholdBps) : 1000;
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500) throw new DeploymentError('INVALID_PAGE_SIZE', 'pageSize deve estar entre 1 e 500.', { statusCode: 400, stage: 'validation' });
     if (!Number.isInteger(threshold) || threshold < 0 || threshold > 10000) throw new DeploymentError('INVALID_EAN_THRESHOLD', 'validEanDropThresholdBps deve estar entre 0 e 10000.', { statusCode: 400, stage: 'validation' });
-    const provider = unit.provider || 'alpha7';
-    if (provider !== 'alpha7') throw new DeploymentError('UNSUPPORTED_PROVIDER', 'A primeira versão suporta apenas alpha7.', { statusCode: 400, stage: 'validation' });
-    return { code, name: requiredUppercaseString(unit.nome, `units[${index}].nome`, 255), cnpj, sourceUnitId,
-      credentialRef, provider, publicationMode: 'automatic', pageSize,
+    return { code, name: requiredUppercaseString(unit.nome, `units[${index}].nome`, 255), cnpj, erpId: erp.id, sourceUnitId,
+      credentialRef, provider: erp.provider, publicationMode: alpha7 ? 'automatic' : 'shadow', pageSize,
       validEanDropThresholdBps: threshold, slug: slugify(unit.slug || `${groupName}-${code}`), initial: unit.initial === true,
       orderWebhookUrl: flowMode === 'full' ? httpsUrl(unit.orderWebhookUrl, `units[${index}].orderWebhookUrl`) : null };
   });

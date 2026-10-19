@@ -2,6 +2,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { prisma } from '../../../prisma/PrismaClient.js';
 import { env } from '../../config/env.js';
+import { catalogWorkerDeploymentFilter } from './worker-scope.js';
 import { processDeployment, processHubCatalogBackground, purgeExpiredDeploymentCredentials, reconcileStorefrontAliases } from './service.js';
 
 const workerId = `${os.hostname()}:${process.pid}:${crypto.randomUUID()}`;
@@ -12,7 +13,7 @@ export async function runCatalogDeploymentWorkerOnce() {
   try {
     const staleBefore = new Date(Date.now() - env.DEPLOYMENT_LEASE_MS);
     const releasePollBefore = new Date(Date.now() - Math.max(5000, env.STOREFRONT_RELEASE_POLL_INTERVAL_MS));
-    const candidate = await prisma.clientDeployment.findFirst({ where: { AND: [
+    const candidate = await prisma.clientDeployment.findFirst({ where: { ...catalogWorkerDeploymentFilter(), AND: [
       { status: { in: ['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico', 'awaiting_activation', 'waiting_storefront_release', 'waiting_storefront'] } },
       { OR: [{ status: { not: 'waiting_storefront_release' } }, { status: 'waiting_storefront_release', updatedAt: { lt: releasePollBefore } }] },
       { OR: [{ status: { not: 'waiting_storefront' } }, { status: 'waiting_storefront', updatedAt: { lt: new Date(Date.now() - 30000) } }] },

@@ -72,7 +72,7 @@ const corsOptions = {
     console.warn(`[CORS] Origem bloqueada: ${origin}`);
     return callback(null, false);
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
