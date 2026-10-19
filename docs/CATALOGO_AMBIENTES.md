@@ -13,7 +13,7 @@ criadas e não faz um retry mudar de ambiente.
 ```env
 HUBUNICO_PRODUCTION_BASE_URL=https://unicocontato.tech/hubunico
 HUBUNICO_PRODUCTION_ADMIN_API_KEY=
-HUBUNICO_STAGING_BASE_URL=https://unicocontato.tech/hubunico-staging
+HUBUNICO_STAGING_BASE_URL=https://api.unicocontato.ia.br/hubunico-staging
 HUBUNICO_STAGING_ADMIN_API_KEY=
 
 UNICOMMERCE_BACK_PRODUCTION_BASE_URL=https://unicocontato.tech/unicommerceBack
@@ -226,3 +226,116 @@ retornar `runId`. O Único Integra persiste esse valor antes de iniciar o
 monitoramento. A consulta usa
 `GET /api/v1/integration/catalog-sync/:integrationId/runs/:runId` e só aceita o
 run exato persistido. Uma execução anterior nunca é usada para liberar o gate.
+
+## Cadastro por ERP
+
+Cada unidade informa `erpId`; os IDs canônicos são 1 Alpha7, 2 Linx,
+3 Automatiza e 4 Vetor. `provider` pode acompanhar o ID, mas deve corresponder
+ao ERP escolhido. O cadastro legado sem ERP continua sendo Alpha7.
+
+| ERP | Configuração por unidade | Publicação inicial |
+| --- | --- | --- |
+| Alpha7 | `sourceUnitId` da unidade de negócio e `credentialRef` com URL PostgreSQL completa | `automatic` |
+| Linx | CNPJ cadastrado na unidade; omitir `sourceUnitId`, `credentialRef` e `vetorApiKey` | `shadow` |
+| Automatiza | `sourceUnitId` igual ao `shop_id` e `credentialRef` com URL `mysql://` completa | `shadow` |
+| Vetor | `sourceUnitId` igual ao `cdFilial` e `vetorApiKey` | `shadow` |
+
+As rotas continuam `POST /api/v1/deployments` e
+`PATCH /api/v1/deployments/:deploymentId/units/:unitId`. O ERP não muda na edição;
+IDs de origem ficam bloqueados depois de criada a integração no Hub. Para
+editar credenciais Vetor, enviar somente `vetorApiKey`; omitir a chave para
+preservar o segredo existente. URLs e API keys são cifradas no campo existente
+e omitidas das respostas, etapas e eventos. `hasCredential` indica a presença
+de qualquer uma dessas credenciais. O adapter Hub traduz `vetorApiKey` do
+formulário para `credentialRef` no POST/PATCH `catalog-sync`, conforme o
+contrato publicado no Hub (`develop` 1e41a9e). A chave continua cifrada no
+backend intermediário e não aparece em seus snapshots ou respostas. O Hub
+mantém seu armazenamento atual; este teste não instala a proposta de arquivo
+privado ou altera o Hub.
+
+`POST /api/databases/testConnection` recebe `driver` opcional (`postgres` padrão
+ou `mysql`) e `sourceUnitId` opcional. No MySQL, o teste exige `sourceUnitId` e
+CNPJ, consulta `view_unicocontato_filial` por `codigo` e confirma exatamente uma
+filial com CNPJ correspondente. Conexão e consultas têm limite total de 5s.
+`?ssl=true` na URL MySQL habilita TLS com certificado verificado; `ssl=false`
+ou ausência do parâmetro usa a conexão sem TLS. Quando houver CA particular,
+configure `AUTOMATIZA_MYSQL_TLS_CA` com o conteúdo PEM tanto neste backend
+quanto no worker Hub, para que o teste use a mesma confiança de certificados.
+
+Linx mantém `pageSize=500` e `validEanDropThresholdBps=1000` na criação.
+Os outros ERPs aceitam os limites operacionais existentes (página 1..500 e
+threshold 0..10000), com os mesmos defaults. A migration
+`20261019120000_scope_catalog_source_identity` substitui a unicidade global
+dos IDs de origem por unicidade parcial Alpha7: `shop_id` e `cdFilial` podem
+se repetir em origens de lojas diferentes. Código por implantação continua
+único. Aplicar a migration antes de usar esses cadastros multiloja.
+
+Snapshots Linx, Automatiza e Vetor são ativados pelo mesmo fluxo após validar
+itens. Cada run recebe até três tentativas persistidas de ativação, sem criar
+outra carga e sem bloquear a resposta HTTP aguardando a publicação. A consulta
+ao run confirma o resultado. Requisições interrompidas podem ser reenviadas
+após o timeout de 35s; o polling respeita seu intervalo configurado. Ao esgotar,
+`HUB_SHADOW_ACTIVATION_FAILED` solicita retomada manual, que inicia novo orçamento
+para o mesmo run e preserva o histórico. Uma nova carga continua disponível
+quando o snapshot precisa ser corrigido.
+
+Promoção de staging exige a credencial não expirada para Alpha7, Automatiza e
+Vetor, e recria os ERPs não Alpha7 em `shadow`. O tenant Unicommerce continua
+usando `erpProvider=alpha7` como adapter legado de acesso ao catálogo Hub,
+com `hubUnicoApiKey` e o ID central da unidade; o ERP real pertence à integração
+de origem no Hub.
+
+## Servidor local com Hub staging real
+
+O comando `npm run catalog:local:staging` usa o launcher específico
+`scripts/start-catalog-staging.mjs`, sem iniciar o servidor genérico, auditoria
+IA ou worker de importação legado. Ele lê `.env.catalog-staging.local` privado
+(`chmod 600`), baseado em `.env.catalog-staging.local.example`, e atende apenas
+em `127.0.0.1:4199`. Expõe catálogo, teste de conexão e health. O banco deve ser
+exatamente `unico_catalog_staging_local` em loopback; o Hub deve ter `staging`
+no caminho da URL. Configurações e promoção de produção são bloqueadas.
+
+`npm run catalog:local:check` verifica essa configuração sem abrir HTTP ou
+iniciar workers. `GET /health/catalog-local` identifica o launcher real para
+o preflight do frontend, sem devolver credenciais. O worker recebe
+`CATALOG_WORKER_ENVIRONMENT=staging`, inclusive para jobs em segundo plano,
+expiração de credenciais e reconciliação de domínios. Essa opção é adicional:
+o servidor normal mantém o comportamento anterior quando ela está vazia.
+
+O PostgreSQL dedicado usa `compose.catalog-staging.local.yml`, porta local
+15439 e volume próprio. `.env.catalog-postgres.local` deve conter somente
+`POSTGRES_USER` e `POSTGRES_PASSWORD` locais, com permissão 0600. Após preparar
+esses arquivos privados, execute:
+
+```sh
+docker compose --project-name unico-catalog-staging-local -f compose.catalog-staging.local.yml up -d
+npm run catalog:local:migrate
+npm run catalog:local:check
+npm run catalog:local:staging
+```
+
+A migração local valida o DSN antes de escrever e usa cópia temporária dos
+arquivos SQL válidos, preservando pastas vazias preexistentes do checkout.
+Nunca aplica migrations em destinos remotos. Para Full, habilite
+`CATALOG_LOCAL_FULL_FLOW_ENABLED=true` e configure Banco/Unicommerce
+explicitamente em staging ou loopback. Uma loja local em
+`CATALOG_LOCAL_STOREFRONT_BASE_URL` exige loopback e
+`CATALOG_LOCAL_STAGING_SERVER=true`; nesse caso, o launcher usa domínios
+`qa-*.test.localhost` e dispensa credenciais Vercel. Sem loja local, a publicação
+Vercel exige suas credenciais específicas de staging.
+
+Com Banco ou Unicommerce ausente, o preflight não declara o fluxo Full pronto.
+Um catálogo carregado no Hub, isoladamente, não equivale à implantação completa.
+
+O feed AtenderBem HTTP é permitido apenas no launcher local, fora de production,
+com configuração e implantação em staging, na origem exata do Banco local:4196
+e caminho `/api/products/catalog/feed.csv`. O mesmo controle é aplicado ao
+cadastro, à URL com `unidadeId` e ao download autenticado. MCP continua exigindo
+HTTPS; feeds HTTP externos, outras portas e caminhos permanecem bloqueados.
+As regras anteriores para feeds HTTPS externos são preservadas.
+
+O launcher remove `DOTENV_CONFIG_OVERRIDE` antes dos imports. A opção textual
+`false` é interpretada como verdadeira pelo carregador `dotenv/config` e poderia
+desfazer os valores protegidos ao reler o arquivo privado. Um teste em processo
+filho cobre essa releitura, incluindo a publicação local habilitada e a promoção
+de produção bloqueada.

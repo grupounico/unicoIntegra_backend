@@ -11,6 +11,36 @@ export function isExpectedRun(latestRun, expectedRunId) {
   return Boolean(latestRun?.runId && expectedRunId && String(latestRun.runId) === String(expectedRunId));
 }
 
+export function buildIntegrationPayload(unit, credentialRef) {
+  const base = {
+    sellerUnitId: Number(unit.hubSellerUnitId),
+    provider: unit.provider,
+  };
+  if (unit.provider === 'linx') {
+    return {
+      ...base,
+      publicationMode: 'shadow',
+      pageSize: 500,
+      validEanDropThresholdBps: 1000,
+    };
+  }
+  return {
+    ...base,
+    sourceUnitId: Number(unit.sourceUnitId),
+    credentialRef,
+    publicationMode: unit.provider === 'alpha7' ? unit.publicationMode : 'shadow',
+    pageSize: unit.pageSize,
+    validEanDropThresholdBps: unit.validEanDropThresholdBps,
+  };
+}
+
+export function runRequiresActivation(run, provider) {
+  if (!['linx', 'automatiza', 'vetor'].includes(provider)) return false;
+  const status = String(run?.status || '').toLowerCase();
+  return status === 'shadow'
+    || (status === 'failed' && run?.error?.code === 'RUN_REQUIRES_ACTIVATION');
+}
+
 export async function createSeller(target, group, initialUnit, idempotencyKey) {
   try {
     const response = await withRetry(() => adminClient(target).post('/api/v1/sellers', { cnpj: group.cnpj, nome: group.nome, username: group.username, unidade: { codigo: initialUnit.code, nome: initialUnit.name, cnpj: initialUnit.cnpj } }, { headers: { 'Idempotency-Key': idempotencyKey } }));
@@ -31,16 +61,23 @@ export async function createUnit(target, sellerId, unit, idempotencyKey) {
 
 export async function createIntegration(target, apiKey, unit, credentialRef, idempotencyKey) {
   try {
-    const response = await withRetry(() => sellerClient(target, apiKey).post('/api/v1/integration/catalog-sync', { sellerUnitId: Number(unit.hubSellerUnitId), provider: unit.provider, sourceUnitId: Number(unit.sourceUnitId), credentialRef, publicationMode: unit.publicationMode, pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps }, { headers: { 'Idempotency-Key': idempotencyKey } }));
+    const response = await withRetry(() => sellerClient(target, apiKey).post('/api/v1/integration/catalog-sync', buildIntegrationPayload(unit, credentialRef), { headers: { 'Idempotency-Key': idempotencyKey } }));
     const integrationId = response.data?.integracao?.integrationId;
     if (!integrationId) throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub não retornou o ID da integração.', { stage: 'creating_integrations', unitId: unit.id });
     return { integrationId };
   } catch (error) { throw mapUpstreamError(error, 'HUB', 'creating_integrations', unit.id); }
 }
 
-export async function updateIntegration(target, apiKey, integrationId, changes, unitId) {
+export function buildIntegrationUpdatePayload(changes, provider = 'alpha7') {
+  const { credentialRef, vetorApiKey, ...operational } = changes;
+  if (provider === 'linx') return operational;
+  const secret = vetorApiKey ?? credentialRef;
+  return { ...operational, ...(secret === undefined ? {} : { credentialRef: secret }) };
+}
+
+export async function updateIntegration(target, apiKey, integrationId, changes, unitId, provider = 'alpha7') {
   try {
-    const response = await withRetry(() => sellerClient(target, apiKey).patch(`/api/v1/integration/catalog-sync/${integrationId}`, changes));
+    const response = await withRetry(() => sellerClient(target, apiKey).patch(`/api/v1/integration/catalog-sync/${integrationId}`, buildIntegrationUpdatePayload(changes, provider)));
     const updatedId = response.data?.integracao?.integrationId ?? response.data?.integrationId;
     if (updatedId !== undefined && Number(updatedId) !== Number(integrationId)) {
       throw new DeploymentError('HUB_INVALID_RESPONSE', 'O Hub confirmou outra integração ao atualizar a origem.', { stage: 'updating_integration', unitId });
@@ -86,6 +123,17 @@ export async function getIntegration(target, apiKey, integrationId, unitId) {
     if (!integration) throw new DeploymentError('HUB_INTEGRATION_NOT_FOUND', 'A integração não foi encontrada no Hub.', { stage: 'validating_hub_catalog', unitId });
     return integration;
   } catch (error) { throw mapUpstreamError(error, 'HUB', 'validating_hub_catalog', unitId); }
+}
+
+export async function requestSnapshotActivation(target, apiKey, integrationId, runId, unitId, idempotencyKey) {
+  try {
+    await sellerClient(target, apiKey).post(
+      `/api/v1/integration/catalog-sync/${integrationId}/activate`, { runId }, { headers: { 'Idempotency-Key': idempotencyKey } },
+    );
+  } catch (error) {
+    if (error.response?.status === 409) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'Não existe snapshot shadow válido para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, httpStatus: 409, action: 'Revise a carga e execute novamente.' });
+    throw mapUpstreamError(error, 'HUB', 'activating_shadow', unitId);
+  }
 }
 
 export function activateSnapshot(target, apiKey, integrationId, runId, unitId, idempotencyKey) {

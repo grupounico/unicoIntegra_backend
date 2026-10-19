@@ -1,6 +1,7 @@
 import { Client } from 'pg';
 
 import { adminPool } from '../database/adminPool.js';
+import { testMysqlDatabaseConnection } from './mysqlConnectionTest.services.js';
 
 const EXTENSION_STATUS_SCHEMA = 'public';
 const EXTENSION_STATUS_TABLE = 'out_embalagem';
@@ -20,8 +21,7 @@ function createDatabaseError(message, statusCode = 500) {
 
 function normalizeOptionalCnpj(value) {
   const digits = String(value || '')
-    .replace(/\D/g, '')
-    .slice(0, 14);
+    .replace(/\D/g, '');
 
   if (!digits) {
     return '';
@@ -38,6 +38,10 @@ function normalizeOptionalCnpj(value) {
 }
 
 function normalizeConnectionConfig(config) {
+  const driver = config.driver === undefined ? 'postgres' : config.driver;
+  if (!['postgres', 'mysql'].includes(driver)) {
+    throw createDatabaseError('Informe um driver de banco válido: postgres ou mysql.', 400);
+  }
   const host = config.host?.trim();
   const database = config.database?.trim();
   const user = config.user?.trim();
@@ -67,6 +71,7 @@ function normalizeConnectionConfig(config) {
   }
 
   return {
+    driver,
     host,
     database,
     user,
@@ -74,6 +79,7 @@ function normalizeConnectionConfig(config) {
     port,
     ssl,
     cnpj,
+    sourceUnitId: config.sourceUnitId,
   };
 }
 
@@ -182,7 +188,6 @@ function mapConnectionError(error) {
 
   const message =
     knownErrors[error.code] ||
-    error.message ||
     'Não foi possível conectar ao banco informado.';
 
   return createDatabaseError(message, error.statusCode || 400);
@@ -385,6 +390,7 @@ export async function createDatabase(name) {
 
 export async function testDatabaseConnection(config) {
   const normalizedConfig = normalizeConnectionConfig(config);
+  if (normalizedConfig.driver === 'mysql') return testMysqlDatabaseConnection(normalizedConfig);
   const client = new Client({
     host: normalizedConfig.host,
     database: normalizedConfig.database,
@@ -414,6 +420,7 @@ export async function testDatabaseConnection(config) {
       message: 'Conexão realizada com sucesso.',
       latencyMs: Date.now() - startedAt,
       details: {
+        driver: 'postgres',
         host: normalizedConfig.host,
         port: normalizedConfig.port,
         database: rows[0]?.database || normalizedConfig.database,

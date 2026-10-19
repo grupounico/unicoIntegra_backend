@@ -1,13 +1,76 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { activateSnapshot, getRun, scheduleRun, updateIntegration } from '../src/modules/catalog-deployment/adapters/hub.client.js';
+import { activateSnapshot, buildIntegrationPayload, buildIntegrationUpdatePayload, createIntegration, getRun, requestSnapshotActivation, runRequiresActivation, scheduleRun, updateIntegration } from '../src/modules/catalog-deployment/adapters/hub.client.js';
 
 async function requestBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
+
+test('cria integração Linx com o payload exato, sem credencial nem sourceUnitId', async (context) => {
+  const expected = { sellerUnitId: 123, provider: 'linx', publicationMode: 'shadow', pageSize: 500, validEanDropThresholdBps: 1000 };
+  assert.deepEqual(buildIntegrationPayload({ hubSellerUnitId: 123, provider: 'linx', sourceUnitId: 999, publicationMode: 'automatic', pageSize: 1, validEanDropThresholdBps: 2 }, 'secret'), expected);
+  const server = http.createServer(async (request, response) => {
+    assert.equal(request.method, 'POST');
+    assert.equal(request.url, '/api/v1/integration/catalog-sync');
+    assert.equal(request.headers['x-api-key'], 'seller-secret');
+    assert.equal(request.headers['idempotency-key'], 'integration-key');
+    assert.deepEqual(await requestBody(request), expected);
+    response.writeHead(201, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ integracao: { integrationId: 23 } }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => server.close());
+  const target = { baseUrl: `http://127.0.0.1:${server.address().port}` };
+  assert.deepEqual(await createIntegration(target, 'seller-secret', { hubSellerUnitId: 123, provider: 'linx' }, undefined, 'integration-key'), { integrationId: 23 });
+});
+
+test('reconhece snapshots Linx, Automatiza e Vetor prontos para ativação', () => {
+  assert.equal(runRequiresActivation({ status: 'shadow' }, 'linx'), true);
+  assert.equal(runRequiresActivation({ status: 'failed', error: { code: 'RUN_REQUIRES_ACTIVATION' } }, 'linx'), true);
+  assert.equal(runRequiresActivation({ status: 'failed', error: { code: 'SOURCE_TIMEOUT' } }, 'linx'), false);
+  assert.equal(runRequiresActivation({ status: 'failed', error: { code: 'RUN_REQUIRES_ACTIVATION' } }, 'alpha7'), false);
+  for (const provider of ['automatiza', 'vetor']) {
+    assert.equal(runRequiresActivation({ status: 'shadow' }, provider), true);
+    assert.equal(runRequiresActivation({ status: 'failed', error: { code: 'RUN_REQUIRES_ACTIVATION' } }, provider), true);
+    assert.equal(runRequiresActivation({ status: 'failed', error: { code: 'SOURCE_TIMEOUT' } }, provider), false);
+  }
+});
+
+test('payloads usam credentialRef do contrato publicado para MySQL e Vetor e começam em shadow', () => {
+  const unit = { hubSellerUnitId: 123, sourceUnitId: 7, publicationMode: 'automatic', pageSize: 250, validEanDropThresholdBps: 750 };
+  assert.deepEqual(buildIntegrationPayload({ ...unit, provider: 'automatiza' }, 'mysql://user:pass@db.example/client'), { sellerUnitId: 123, provider: 'automatiza', sourceUnitId: 7, credentialRef: 'mysql://user:pass@db.example/client', publicationMode: 'shadow', pageSize: 250, validEanDropThresholdBps: 750 });
+  assert.deepEqual(buildIntegrationPayload({ ...unit, provider: 'vetor' }, 'test-vetor-key'), { sellerUnitId: 123, provider: 'vetor', sourceUnitId: 7, credentialRef: 'test-vetor-key', publicationMode: 'shadow', pageSize: 250, validEanDropThresholdBps: 750 });
+  assert.deepEqual(buildIntegrationUpdatePayload({ credentialRef: 'test-vetor-key', pageSize: 250 }, 'vetor'), { credentialRef: 'test-vetor-key', pageSize: 250 });
+  assert.deepEqual(buildIntegrationUpdatePayload({ credentialRef: 'forbidden', vetorApiKey: 'forbidden', pageSize: 250 }, 'linx'), { pageSize: 250 });
+});
+
+test('PATCH Vetor adapta API key do formulário para credentialRef do Hub atual', async (context) => {
+  const server = http.createServer(async (request, response) => {
+    assert.equal(request.method, 'PATCH');
+    assert.deepEqual(await requestBody(request), { credentialRef: 'test-vetor-key', pageSize: 250 });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ integracao: { integrationId: 23 } }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => server.close());
+  await updateIntegration({ baseUrl: `http://127.0.0.1:${server.address().port}` }, 'seller-secret', 23, { credentialRef: 'test-vetor-key', pageSize: 250 }, 'unit-1', 'vetor');
+});
+
+test('uma tentativa de ativação devolve falha sanitizada sem retry oculto', async (context) => {
+  let requests = 0;
+  const server = http.createServer((request, response) => {
+    requests += 1;
+    response.writeHead(503, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ message: 'upstream-private-content' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  context.after(() => server.close());
+  await assert.rejects(() => requestSnapshotActivation({ baseUrl: `http://127.0.0.1:${server.address().port}` }, 'seller-secret', 23, 'run-1', 'unit-1', 'same-key'), (error) => error.code === 'HUB_UNAVAILABLE' && !error.message.includes('upstream-private-content'));
+  assert.equal(requests, 1);
+});
 
 test('cria um run identificável e consulta exatamente o mesmo run', async (context) => {
   const expectedRunId = '1a92d969-03a7-4b0d-9920-1b9811a98727';

@@ -4,13 +4,14 @@ import { DeploymentError } from './errors.js';
 import { normalizeAtenderBemConfig, feedIdFromUnit, buildFeedUrl, preserveAtenderBemProgress } from './atenderbem-config.js';
 import { createMcpClient, LabError } from './adapters/mcp.client.js';
 import { Prisma } from '@prisma/client';
-import { readAtenderBemFeed } from './atenderbem-feed.js';
+import { readAtenderBemFeed, resolveAtenderBemFeedEnvironment } from './atenderbem-feed.js';
 
 export async function saveAtenderBemConfiguration(deploymentId, unitId, input, requestedBy) {
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada nesta implantação.', { statusCode: 404 });
   const oldSecrets = unit.atenderBemSecretsEncrypted ? JSON.parse(decryptSecret(unit.atenderBemSecretsEncrypted)) : {};
-  const { config, secrets } = normalizeAtenderBemConfig({ ...input, feedUnitId: feedIdFromUnit(unit) }, oldSecrets);
+  const feedEnvironment = await resolveAtenderBemFeedEnvironment(unit);
+  const { config, secrets } = normalizeAtenderBemConfig({ ...input, feedUnitId: feedIdFromUnit(unit) }, oldSecrets, feedEnvironment);
   // Credentials must be supplied again when moving to a different destination.
   const previous = unit.atenderBemConfig;
   if (previous?.import && !['completed', 'failed', 'cancelled', 'failed_before_import'].includes(previous.import.status)) {
@@ -37,7 +38,7 @@ export async function saveAtenderBemConfiguration(deploymentId, unitId, input, r
     if (updated.count !== 1) throw new DeploymentError('ATENDERBEM_CONFIG_CHANGED', 'A configuração mudou. Atualize a página antes de continuar.', { statusCode: 409 });
     await tx.clientDeploymentEvent.create({ data: { deploymentId, unitId, eventType: 'atenderbem_configuration_saved', createdBy: requestedBy, safeMetadata: { executionEnabled: false } } });
   });
-  return { ...storedConfig, feedUrl: buildFeedUrl(config.feedBaseUrl, config.feedUnitId) };
+  return { ...storedConfig, feedUrl: buildFeedUrl(config.feedBaseUrl, config.feedUnitId, feedEnvironment) };
 }
 
 export async function createAtenderBemGroup(deploymentId, unitId, requestedBy, dependencies = {}) {

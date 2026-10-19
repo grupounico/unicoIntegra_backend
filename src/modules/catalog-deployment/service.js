@@ -9,10 +9,14 @@ import { ASSET_DIMENSIONS, ASSET_TYPES, canonicalHash, meetsCoverageGate, slugif
 import { catalogTargets, selectedCatalogEnvironment } from './targets.js';
 import { activatedTenantCanResume, buildTenantErpConfig, resumableUnitStatus, shouldRetryBancoUnicoJob, tenantConfigurationIsValid } from './tenant-routing.js';
 import { buildStorefrontDomain, selectStorefrontDomain, tenantStorefrontUrls, assertTenantStorefrontUrls } from './storefront.js';
+import { catalogErpByProvider } from './erp.js';
+import { isShadowActivationFailure, shadowActivationDecision } from './shadow-activation.js';
+import { catalogWorkerCanProcess, catalogWorkerUnitFilter } from './worker-scope.js';
 import * as hub from './adapters/hub.client.js';
 import * as commerce from './adapters/unicommerce.client.js';
 import * as vercel from './adapters/vercel.client.js';
 import * as banco from './adapters/banco-unico.client.js';
+import { localStorefrontProbe } from './adapters/local-storefront.js';
 
 const streams = new EventEmitter(); streams.setMaxListeners(500);
 const ACTIVE_JOBS = new Set(['pending', 'claimed', 'processing', 'cancelling', 'paused']);
@@ -31,7 +35,7 @@ function sanitizeSnapshot(input) {
   return {
     flowMode: input.flowMode,
     group: input.group,
-    units: input.units.map(({ credentialRef, orderWebhookUrl, ...unit }) => ({
+    units: input.units.map(({ credentialRef, vetorApiKey: _vetorApiKey, orderWebhookUrl, ...unit }) => ({
       ...unit,
       hasCredential: Boolean(credentialRef),
       hasOrderWebhookUrl: Boolean(orderWebhookUrl),
@@ -80,7 +84,13 @@ function formatDeployment(value) {
   const safe = jsonSafe(value);
   delete safe.sellerApiKeyEncrypted;
   safe.units?.forEach((unit) => {
-    unit.sourceUnitId = Number(unit.sourceUnitId);
+    if (unit.storefrontDomain) {
+      const target = catalogTargets(safe.environment).storefront;
+      const local = target.driver === 'local' ? localStorefrontProbe(target, unit.storefrontDomain, unit.id) : null;
+      unit.storefrontUrl = local ? `http://${local.headers.Host}` : `https://${unit.storefrontDomain}`;
+    }
+    unit.erpId = catalogErpByProvider(unit.provider)?.id ?? null;
+    unit.sourceUnitId = unit.sourceUnitId === null || unit.sourceUnitId === undefined ? null : Number(unit.sourceUnitId);
     unit.hasCredential = Boolean(unit.credentialRefEncrypted);
     unit.hasOrderWebhookUrl = Boolean(unit.orderWebhookUrlEncrypted);
     delete unit.credentialRefEncrypted;
@@ -128,8 +138,8 @@ export async function createDeployment(payload, idempotencyKey, correlationId) {
     username: normalized.group.username, flowMode: normalized.flowMode, environment, requestedBy: normalized.requestedBy, correlationId,
     inputSnapshot: sanitizeSnapshot(normalized),
     units: { create: normalized.units.map((unit) => ({ code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug,
-      isInitial: unit.initial, provider: unit.provider, sourceUnitId: BigInt(unit.sourceUnitId),
-      credentialRefEncrypted: encryptSecret(unit.credentialRef), orderWebhookUrlEncrypted: unit.orderWebhookUrl ? encryptSecret(unit.orderWebhookUrl) : null, publicationMode: unit.publicationMode,
+      isInitial: unit.initial, provider: unit.provider, sourceUnitId: unit.sourceUnitId === null ? null : BigInt(unit.sourceUnitId),
+      credentialRefEncrypted: unit.credentialRef ? encryptSecret(unit.credentialRef) : null, orderWebhookUrlEncrypted: unit.orderWebhookUrl ? encryptSecret(unit.orderWebhookUrl) : null, publicationMode: unit.publicationMode,
       pageSize: unit.pageSize, validEanDropThresholdBps: unit.validEanDropThresholdBps })) },
     ...(normalized.flowMode === 'full' ? { assets: { create: ASSET_TYPES.map((type) => ({ type })) } } : {}),
   }, include: includeAll() });
@@ -170,13 +180,18 @@ export async function revealSellerToken(id, actor) {
 const EDITABLE_DEPLOYMENT_STATUSES = new Set(['draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required']);
 
 export async function updateDeploymentUnit(deploymentId, unitId, payload, actor) {
-  const changes = validateUnitUpdatePayload(payload);
   const deployment = await prisma.clientDeployment.findUnique({ where: { id: deploymentId } });
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404, unitId });
+  const changes = validateUnitUpdatePayload(payload, unit.provider);
   if (!EDITABLE_DEPLOYMENT_STATUSES.has(deployment.status)) {
     throw new DeploymentError('DEPLOYMENT_NOT_EDITABLE', 'Esta implantação não pode ser editada enquanto está em processamento ou depois da ativação.', {
       statusCode: 409, stage: 'editing_unit', unitId, action: 'Aguarde o processamento terminar antes de corrigir os dados.',
+    });
+  }
+  if (unit.provider === 'linx' && (changes.sourceUnitId !== undefined || changes.credentialRef !== undefined)) {
+    throw new DeploymentError('LINX_SOURCE_CONFIGURATION_FORBIDDEN', 'A integração Linx usa somente o CNPJ da unidade e não aceita ID de origem ou conexão PostgreSQL.', {
+      statusCode: 400, stage: 'editing_unit', unitId,
     });
   }
 
@@ -192,7 +207,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
   }
   const changedSourceUnitId = changes.sourceUnitId === undefined ? undefined : BigInt(changes.sourceUnitId);
   if (unit.hubIntegrationId && changedSourceUnitId !== undefined && changedSourceUnitId !== unit.sourceUnitId) {
-    throw new DeploymentError('SOURCE_UNIT_LOCKED', 'O ID da unidade no Alpha7 não pode ser alterado porque a integração já existe no Hub.', {
+    throw new DeploymentError('SOURCE_UNIT_LOCKED', 'O ID da unidade no ERP não pode ser alterado porque a integração já existe no Hub.', {
       statusCode: 409, stage: 'editing_unit', unitId, action: 'Solicite a recriação da integração para trocar o ID de origem.',
     });
   }
@@ -201,7 +216,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
     const duplicate = await prisma.clientDeploymentUnit.findFirst({ where: { deploymentId, code: { equals: changes.code, mode: 'insensitive' }, NOT: { id: unitId } }, select: { id: true } });
     if (duplicate) throw new DeploymentError('DUPLICATE_UNIT_CODE', 'Este código já está em uso por outra unidade da implantação.', { statusCode: 409, stage: 'editing_unit', unitId });
   }
-  if (changedSourceUnitId !== undefined && changedSourceUnitId !== unit.sourceUnitId) {
+  if (unit.provider === 'alpha7' && changedSourceUnitId !== undefined && changedSourceUnitId !== unit.sourceUnitId) {
     const duplicate = await prisma.clientDeploymentUnit.findFirst({ where: { deploymentId, provider: unit.provider, sourceUnitId: changedSourceUnitId, NOT: { id: unitId } }, select: { id: true } });
     if (duplicate) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', 'Este ID do Alpha7 já está em uso por outra unidade da implantação.', { statusCode: 409, stage: 'editing_unit', unitId });
   }
@@ -212,7 +227,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
   if (changes.validEanDropThresholdBps !== undefined && changes.validEanDropThresholdBps !== unit.validEanDropThresholdBps) hubPatch.validEanDropThresholdBps = changes.validEanDropThresholdBps;
   if (unit.hubIntegrationId && Object.keys(hubPatch).length) {
     if (!deployment.sellerApiKeyEncrypted) throw new DeploymentError('HUB_CREDENTIAL_MISSING', 'A credencial do seller não está disponível para atualizar a integração.', { statusCode: 409, stage: 'editing_unit', unitId });
-    await hub.updateIntegration(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, hubPatch, unitId);
+    await hub.updateIntegration(catalogTargets(deployment.environment).hub, decryptSecret(deployment.sellerApiKeyEncrypted), unit.hubIntegrationId, hubPatch, unitId, unit.provider);
   }
 
   const changedFields = [];
@@ -226,7 +241,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
   assign('sourceUnitId', changedSourceUnitId);
   assign('pageSize', changes.pageSize);
   assign('validEanDropThresholdBps', changes.validEanDropThresholdBps);
-  if (changes.credentialRef !== undefined) { data.credentialRefEncrypted = encryptSecret(changes.credentialRef); changedFields.push('credentialRef'); }
+  if (changes.credentialRef !== undefined) { data.credentialRefEncrypted = encryptSecret(changes.credentialRef); changedFields.push(unit.provider === 'vetor' ? 'vetorApiKey' : 'credentialRef'); }
   if (changes.orderWebhookUrl !== undefined) { data.orderWebhookUrlEncrypted = encryptSecret(changes.orderWebhookUrl); changedFields.push('orderWebhookUrl'); }
   if ((changes.code !== undefined || changes.name !== undefined) && !unit.hubSellerUnitId) data.slug = slugify(`${deployment.groupName}-${changes.code || unit.code}`);
 
@@ -264,7 +279,7 @@ export async function updateDeploymentUnit(deploymentId, unitId, payload, actor)
   await prisma.clientDeployment.update({ where: { id: deploymentId }, data: { retryable: true } });
   await event(deploymentId, 'unit_configuration_updated', {
     unitId, fromStatus: unit.status, toStatus: data.status || unit.status, createdBy: actor,
-    metadata: { changedFields, requiresNewCatalogRun: hubConfigurationChanged, valuesProtected: changedFields.some((field) => ['credentialRef', 'orderWebhookUrl'].includes(field)) },
+    metadata: { changedFields, requiresNewCatalogRun: hubConfigurationChanged, valuesProtected: changedFields.some((field) => ['credentialRef', 'vetorApiKey', 'orderWebhookUrl'].includes(field)) },
   });
   return getDeployment(deploymentId);
 }
@@ -319,9 +334,12 @@ async function provisionHub(deployment, units) {
   for (const unit of units) {
     try {
       let current = await prisma.clientDeploymentUnit.findUnique({ where: { id: unit.id } });
-      if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, sourceUnitId: Number(current.sourceUnitId) }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
-      if (!current.hubIntegrationId) { const stepKey = `${deployment.id}:${unit.id}:integration`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, decryptSecret(current.credentialRefEncrypted), stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, sourceUnitId: Number(current.sourceUnitId), hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } }); }
-      if (current.hubIntegrationId && current.publicationMode !== 'automatic') {
+      if (!current.hubSellerUnitId) { const stepKey = `${deployment.id}:${unit.id}:hub-unit`; const result = await trackedStep(deployment.id, unit.id, 'hub_create_unit', () => hub.createUnit(targets.hub, deployment.hubSellerId, current, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, unitCode: current.code, provider: current.provider, sourceUnitId: current.sourceUnitId === null ? null : Number(current.sourceUnitId) }, response: (value) => ({ hubSellerUnitId: String(value.unitId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubSellerUnitId: result.unitId, status: 'hub_unit_created' } }); }
+      if (!current.hubIntegrationId) {
+        if (current.provider !== 'linx' && (!current.credentialRefEncrypted || (current.credentialExpiresAt && current.credentialExpiresAt <= new Date()))) throw new DeploymentError('ERP_CREDENTIAL_MISSING', 'A credencial do ERP não está disponível para criar a integração.', { statusCode: 409, stage: 'creating_integrations', unitId: unit.id, action: 'Informe novamente a credencial da origem e tente novamente.' });
+        const stepKey = `${deployment.id}:${unit.id}:integration`; const credentialRef = current.credentialRefEncrypted ? decryptSecret(current.credentialRefEncrypted) : undefined; const result = await trackedStep(deployment.id, unit.id, 'hub_create_integration', () => hub.createIntegration(targets.hub, apiKey, current, credentialRef, stepKey), { idempotencyKey: stepKey, request: { environment: deployment.environment, provider: current.provider, sourceUnitId: current.sourceUnitId === null ? null : Number(current.sourceUnitId), hubSellerUnitId: String(current.hubSellerUnitId), publicationMode: current.publicationMode, pageSize: current.pageSize }, response: (value) => ({ hubIntegrationId: String(value.integrationId) }) }); current = await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { hubIntegrationId: result.integrationId, status: 'integration_created' } });
+      }
+      if (current.provider === 'alpha7' && current.hubIntegrationId && current.publicationMode !== 'automatic') {
         await trackedStep(deployment.id, unit.id, 'hub_enable_automatic_publication', () => hub.updateIntegration(targets.hub, apiKey, current.hubIntegrationId, { publicationMode: 'automatic' }, current.id), {
           request: { environment: deployment.environment, hubIntegrationId: String(current.hubIntegrationId), publicationMode: 'automatic' },
         });
@@ -346,6 +364,47 @@ async function provisionHub(deployment, units) {
       }
     } catch (error) { await failUnit(deployment, unit, error); }
   }
+}
+
+const activationClaims = new Set();
+
+async function dispatchShadowActivation(deployment, unit, apiKey, runId) {
+  const stepKey = `${deployment.id}:${unit.id}:activate:${runId}`;
+  if (activationClaims.has(stepKey)) return;
+  activationClaims.add(stepKey);
+  try {
+    const reset = await prisma.clientDeploymentEvent.findFirst({ where: {
+      deploymentId: deployment.id, unitId: unit.id,
+      eventType: { in: ['unit_retry_requested', 'hub_activation_retry_requested'] },
+    }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+    const attempts = await prisma.clientDeploymentStep.findMany({ where: {
+      deploymentId: deployment.id, unitId: unit.id, step: 'hub_activate_shadow', idempotencyKey: stepKey,
+      ...(reset ? { startedAt: { gte: reset.createdAt } } : {}),
+    }, orderBy: { startedAt: 'desc' } });
+    const decision = shadowActivationDecision(attempts);
+    if (decision === 'wait') return;
+    if (decision === 'exhausted') throw new DeploymentError('HUB_SHADOW_ACTIVATION_FAILED', 'A ativação do snapshot não foi confirmada após três tentativas.', {
+      statusCode: 409, stage: 'activating_shadow', unitId: unit.id,
+      action: 'Tente novamente para reenviar a ativação do mesmo snapshot. Se a falha persistir, revise o Hub.',
+    });
+    await prisma.clientDeploymentStep.updateMany({ where: {
+      deploymentId: deployment.id, unitId: unit.id, step: 'hub_activate_shadow', idempotencyKey: stepKey, status: 'running',
+    }, data: { status: 'failed', errorCode: 'HUB_ACTIVATION_INTERRUPTED', errorMessage: 'A requisição anterior não foi confirmada.', finishedAt: new Date() } });
+    const attempt = await prisma.clientDeploymentStep.create({ data: {
+      deploymentId: deployment.id, unitId: unit.id, step: 'hub_activate_shadow', status: 'running',
+      attempt: attempts.length + 1, idempotencyKey: stepKey,
+      requestSnapshot: { provider: unit.provider, integrationId: String(unit.hubIntegrationId), runId },
+    } });
+    await event(deployment.id, 'hub_activation_requested', { unitId: unit.id, fromStatus: unit.status, toStatus: 'activating_shadow', metadata: { runId, provider: unit.provider, attempt: attempts.length + 1 } });
+    void hub.requestSnapshotActivation(catalogTargets(deployment.environment).hub, apiKey, unit.hubIntegrationId, runId, unit.id, stepKey)
+      .then(async () => {
+        await prisma.clientDeploymentStep.updateMany({ where: { id: attempt.id, status: 'running' }, data: { status: 'completed', finishedAt: new Date() } });
+      }, async (error) => {
+        const exposed = publicError(error, { deploymentId: deployment.id, unitId: unit.id });
+        await prisma.clientDeploymentStep.updateMany({ where: { id: attempt.id, status: 'running' }, data: { status: 'failed', errorCode: exposed.code, errorMessage: exposed.message, finishedAt: new Date() } });
+        await event(deployment.id, 'hub_activation_request_failed', { unitId: unit.id, metadata: { runId, attempt: attempts.length + 1, code: exposed.code, httpStatus: exposed.httpStatus } });
+      }).catch(() => console.warn(JSON.stringify({ event: 'hub_activation_tracking_failed', deploymentId: deployment.id, unitId: unit.id, runId })));
+  } finally { activationClaims.delete(stepKey); }
 }
 
 async function monitorHub(deployment, units, { force = false } = {}) {
@@ -378,18 +437,20 @@ async function monitorHub(deployment, units, { force = false } = {}) {
       const processedRows = Number(run.processedRows ?? run.sourceRows ?? 0);
       const validRows = Number(run.validRows || 0);
       const publishedRows = Number(run.publishedRows ?? (status === 'published' ? validRows : 0));
-      if (unit.status === 'activating_shadow' && status === 'shadow') {
-        hub.activateSnapshot(targets.hub, apiKey, unit.hubIntegrationId, expectedRunId, unit.id, `${deployment.id}:${unit.id}:activate:${expectedRunId}`);
+      const requiresActivation = hub.runRequiresActivation(run, unit.provider);
+      if (requiresActivation) {
+        if (validRows <= 0) throw new DeploymentError('HUB_EMPTY_CATALOG', 'A carga terminou sem itens válidos para ativação.', { statusCode: 422, stage: 'validating_hub_catalog', unitId: unit.id });
+        await dispatchShadowActivation(deployment, unit, apiKey, expectedRunId);
         waiting = true;
         await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
-          status: 'activating_shadow', latestRunId: expectedRunId, latestRunStatus: status,
+          status: 'activating_shadow', latestRunId: expectedRunId, latestRunStatus: 'shadow',
           latestProcessedRows: processedRows, latestValidRows: validRows, latestPublishedRows: publishedRows,
           latestRunStartedAt: run.startedAt ? new Date(run.startedAt) : unit.latestRunStartedAt,
           latestRunFinishedAt: run.finishedAt ? new Date(run.finishedAt) : unit.latestRunFinishedAt,
           latestRunPolledAt: now, nextRunPollAt: new Date(now.getTime() + env.DEPLOYMENT_HUB_POLL_INTERVAL_MS),
           runNotFoundCount: 0,
         } });
-        await eventIfChanged(deployment.id, 'hub_activation_pending', unit.id, { runId: expectedRunId, status });
+        await eventIfChanged(deployment.id, 'hub_activation_pending', unit.id, { runId: expectedRunId, status: 'shadow' });
         continue;
       }
       const delayed = !RUN_SUCCESS.has(status) && !RUN_FAILURE.has(status)
@@ -684,12 +745,14 @@ async function importBancoUnico(deployment, units) {
 }
 
 export async function processHubCatalogBackground() {
-  const job = await prisma.bancoUnicoImportJob.findFirst({ where: { sourceType: 'hub_catalog', status: 'external_processing' }, orderBy: { updatedAt: 'asc' } });
+  const scope = catalogWorkerUnitFilter();
+  const scopedUnits = Object.keys(scope).length ? await prisma.clientDeploymentUnit.findMany({ where: { ...scope, bancoUnicoImportJobId: { not: null } }, select: { bancoUnicoImportJobId: true } }) : null;
+  const job = await prisma.bancoUnicoImportJob.findFirst({ where: { sourceType: 'hub_catalog', status: 'external_processing', ...(scopedUnits ? { id: { in: scopedUnits.map((unit) => unit.bancoUnicoImportJobId) } } : {}) }, orderBy: { updatedAt: 'asc' } });
   if (!job) return false;
-  const unit = await prisma.clientDeploymentUnit.findFirst({ where: { bancoUnicoImportJobId: job.id } });
+  const unit = await prisma.clientDeploymentUnit.findFirst({ where: { bancoUnicoImportJobId: job.id, ...scope } });
   if (!unit) return false;
   const deployment = await prisma.clientDeployment.findUnique({ where: { id: unit.deploymentId } });
-  if (!deployment) return false;
+  if (!deployment || !catalogWorkerCanProcess(deployment)) return false;
   await processHubCatalogUnit(deployment, unit);
   return true;
 }
@@ -719,7 +782,7 @@ export async function refreshDeploymentRuns(id) {
 
 export async function processDeployment(id) {
   let deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
-  if (!deployment || ['draft', 'cancelled', 'completed'].includes(deployment.status)) return;
+  if (!deployment || !catalogWorkerCanProcess(deployment) || ['draft', 'cancelled', 'completed'].includes(deployment.status)) return;
   try {
     await provisionHub(deployment, deployment.units); deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true, assets: true } });
     const hubWaiting = await monitorHub(deployment, deployment.units);
@@ -856,49 +919,54 @@ async function provisionStorefrontUnits(deployment, actor, idempotencyKey) {
         where: { id: unit.id },
         data: { storefrontDomain: domain, storefrontStatus: 'validating_release' },
       });
-      const release = await trackedStep(deployment.id, unit.id, 'vercel_validate_main_release',
-        () => vercel.validatedMainDeployment(target.vercel, unit.id), {
-          request: { environment: deployment.environment, projectId: target.vercel.projectId, owner: target.vercel.githubOwner, repo: target.vercel.githubRepo, branch: target.vercel.githubBranch },
-          response: (value) => ({ projectId: target.vercel.projectId, deploymentId: value.deployment.uid, branch: value.githubBranch, commitSha: value.githubCommitSha, readyState: value.deployment.readyState || value.deployment.state }),
+      if (target.driver === 'local') {
+        localStorefrontProbe(target, domain, unit.id);
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'configuring_tenant' } });
+      } else {
+        const release = await trackedStep(deployment.id, unit.id, 'vercel_validate_main_release',
+          () => vercel.validatedMainDeployment(target.vercel, unit.id), {
+            request: { environment: deployment.environment, projectId: target.vercel.projectId, owner: target.vercel.githubOwner, repo: target.vercel.githubRepo, branch: target.vercel.githubBranch },
+            response: (value) => ({ projectId: target.vercel.projectId, deploymentId: value.deployment.uid, branch: value.githubBranch, commitSha: value.githubCommitSha, readyState: value.deployment.readyState || value.deployment.state }),
+          });
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
+          storefrontStatus: 'configuring_tenant', vercelProjectId: target.vercel.projectId,
+          vercelDeploymentId: release.deployment.uid, vercelGitBranch: release.githubBranch,
+          vercelGitCommitSha: release.githubCommitSha, storefrontReleaseVerifiedAt: release.verifiedAt,
+        } });
+        await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'assigning_alias' } });
+        await trackedStep(deployment.id, unit.id, 'vercel_register_project_domain',
+          () => vercel.ensureProjectDomain(target.vercel, domain, unit.id), {
+            request: { projectId: target.vercel.projectId, domain }, response: (value) => value,
+          });
+        await trackedStep(deployment.id, unit.id, 'vercel_configure_production_access',
+          () => vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id), {
+            request: { projectId: target.vercel.projectId, environment: deployment.environment }, response: (value) => value,
+          });
+        const aliasResult = await trackedStep(deployment.id, unit.id, 'vercel_assign_storefront_alias',
+          () => vercel.ensureProjectAlias(target.vercel, domain, unit.id, release.githubCommitSha), {
+            idempotencyKey: `${deployment.id}:${unit.id}:vercel-alias:${idempotencyKey}`,
+            request: { environment: deployment.environment, projectId: target.vercel.projectId, domain },
+            response: (value) => ({
+              projectId: target.vercel.projectId,
+              deploymentId: value.deployment.uid,
+              branch: value.githubBranch,
+              commitSha: value.githubCommitSha,
+              domain: value.alias.alias || domain,
+            }),
+          });
+        await prisma.clientDeploymentUnit.update({
+          where: { id: unit.id },
+          data: {
+            storefrontStatus: 'validating',
+            vercelProjectId: target.vercel.projectId,
+            vercelDeploymentId: aliasResult.deployment.uid,
+            vercelGitBranch: aliasResult.githubBranch,
+            vercelGitCommitSha: aliasResult.githubCommitSha,
+            storefrontReleaseVerifiedAt: aliasResult.verifiedAt,
+            domainVerifiedAt: new Date(),
+          },
         });
-      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: {
-        storefrontStatus: 'configuring_tenant', vercelProjectId: target.vercel.projectId,
-        vercelDeploymentId: release.deployment.uid, vercelGitBranch: release.githubBranch,
-        vercelGitCommitSha: release.githubCommitSha, storefrontReleaseVerifiedAt: release.verifiedAt,
-      } });
-      await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { storefrontStatus: 'assigning_alias' } });
-      await trackedStep(deployment.id, unit.id, 'vercel_register_project_domain',
-        () => vercel.ensureProjectDomain(target.vercel, domain, unit.id), {
-          request: { projectId: target.vercel.projectId, domain }, response: (value) => value,
-        });
-      await trackedStep(deployment.id, unit.id, 'vercel_configure_production_access',
-        () => vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id), {
-          request: { projectId: target.vercel.projectId, environment: deployment.environment }, response: (value) => value,
-        });
-      const aliasResult = await trackedStep(deployment.id, unit.id, 'vercel_assign_storefront_alias',
-        () => vercel.ensureProjectAlias(target.vercel, domain, unit.id, release.githubCommitSha), {
-          idempotencyKey: `${deployment.id}:${unit.id}:vercel-alias:${idempotencyKey}`,
-          request: { environment: deployment.environment, projectId: target.vercel.projectId, domain },
-          response: (value) => ({
-            projectId: target.vercel.projectId,
-            deploymentId: value.deployment.uid,
-            branch: value.githubBranch,
-            commitSha: value.githubCommitSha,
-            domain: value.alias.alias || domain,
-          }),
-        });
-      await prisma.clientDeploymentUnit.update({
-        where: { id: unit.id },
-        data: {
-          storefrontStatus: 'validating',
-          vercelProjectId: target.vercel.projectId,
-          vercelDeploymentId: aliasResult.deployment.uid,
-          vercelGitBranch: aliasResult.githubBranch,
-          vercelGitCommitSha: aliasResult.githubCommitSha,
-          storefrontReleaseVerifiedAt: aliasResult.verifiedAt,
-          domainVerifiedAt: new Date(),
-        },
-      });
+      }
       await trackedStep(deployment.id, unit.id, 'unicommerce_configure_storefront_domain',
         () => commerce.configureStorefrontDomain(
           catalogTargets(deployment.environment).unicommerce,
@@ -1007,6 +1075,7 @@ async function completeStorefrontDeployment(deployment, actor, storefront, snaps
       throw error;
     }
   }
+
   const completedSnapshot = { ...snapshot, storefront: storefront.domains };
   await finalizeDeploymentCredentials(deployment);
   if (deployment.environment === 'production' && deployment.promotedFromDeploymentId) {
@@ -1101,7 +1170,7 @@ export async function promoteToProduction(id, actor, idempotencyKey) {
   if (!source || source.environment !== 'staging' || source.status !== 'completed') throw new DeploymentError('PROMOTION_NOT_READY', 'Somente uma implantação staging concluída pode ser promovida.', { statusCode: 409, stage: 'promotion' });
   if (source.flowMode === 'hub_banco_only') throw new DeploymentError('FLOW_ACTION_NOT_APPLICABLE', 'O fluxo Hub + Banco Único não possui storefront para promover.', { statusCode: 409, stage: 'promotion' });
   if (source.assets.length !== ASSET_TYPES.length || source.assets.some((asset) => asset.status !== 'confirmed')) throw new DeploymentError('PROMOTION_BRANDING_INCOMPLETE', 'O staging não possui o branding V2 completo.', { statusCode: 409, stage: 'promotion' });
-  if (source.units.some((unit) => !unit.credentialRefEncrypted || (unit.credentialExpiresAt && unit.credentialExpiresAt <= new Date()))) {
+  if (source.units.some((unit) => unit.provider !== 'linx' && (!unit.credentialRefEncrypted || (unit.credentialExpiresAt && unit.credentialExpiresAt <= new Date())))) {
     throw new DeploymentError('PROMOTION_CREDENTIAL_EXPIRED', 'A credencial ERP retida para promoção expirou.', { statusCode: 409, stage: 'promotion' });
   }
   const release = await vercel.validatedMainDeployment(catalogTargets('staging').storefront.vercel, source.units[0]?.id);
@@ -1116,7 +1185,7 @@ export async function promoteToProduction(id, actor, idempotencyKey) {
     units: { create: source.units.map((unit) => ({
       code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug, isInitial: unit.isInitial,
       provider: unit.provider, sourceUnitId: unit.sourceUnitId, credentialRefEncrypted: unit.credentialRefEncrypted,
-      orderWebhookUrlEncrypted: unit.orderWebhookUrlEncrypted, publicationMode: 'automatic', pageSize: unit.pageSize,
+      orderWebhookUrlEncrypted: unit.orderWebhookUrlEncrypted, publicationMode: unit.provider === 'alpha7' ? 'automatic' : 'shadow', pageSize: unit.pageSize,
       validEanDropThresholdBps: unit.validEanDropThresholdBps, credentialExpiresAt: unit.credentialExpiresAt,
     })) },
     assets: { create: source.assets.map((asset) => ({
@@ -1131,7 +1200,7 @@ export async function promoteToProduction(id, actor, idempotencyKey) {
 
 export async function purgeExpiredDeploymentCredentials() {
   return prisma.clientDeploymentUnit.updateMany({
-    where: { credentialExpiresAt: { lt: new Date() }, credentialRefEncrypted: { not: null } },
+    where: { credentialExpiresAt: { lt: new Date() }, credentialRefEncrypted: { not: null }, ...catalogWorkerUnitFilter() },
     data: { credentialRefEncrypted: null, credentialExpiresAt: null },
   });
 }
@@ -1139,7 +1208,7 @@ export async function purgeExpiredDeploymentCredentials() {
 export async function reconcileStorefrontAliases() {
   const staleBefore = new Date(Date.now() - Math.max(60000, env.STOREFRONT_RECONCILE_INTERVAL_MS));
   const units = await prisma.clientDeploymentUnit.findMany({
-    where: { storefrontStatus: 'ready', storefrontDomain: { not: null }, OR: [
+    where: { ...catalogWorkerUnitFilter(), storefrontStatus: 'ready', storefrontDomain: { not: null }, OR: [
       { storefrontReleaseVerifiedAt: null }, { storefrontReleaseVerifiedAt: { lt: staleBefore } },
     ] },
     orderBy: { storefrontReleaseVerifiedAt: 'asc' }, take: 20,
@@ -1148,7 +1217,7 @@ export async function reconcileStorefrontAliases() {
     const deployment = await prisma.clientDeployment.findUnique({ where: { id: unit.deploymentId } });
     if (!deployment || deployment.status !== 'completed') continue;
     const target = catalogTargets(deployment.environment).storefront;
-    if (!target.enabled) continue;
+    if (!target.enabled || target.driver === 'local') continue;
     const release = await vercel.validatedMainDeployment(target.vercel, unit.id);
     await vercel.ensureProjectDomain(target.vercel, unit.storefrontDomain, unit.id);
     await vercel.ensureProductionAccess(target.vercel, deployment.environment, unit.id);
@@ -1192,7 +1261,7 @@ export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {
   const deployment = await prisma.clientDeployment.findUnique({ where: { id: deploymentId } });
   const unit = await prisma.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
   if (!deployment || !unit) throw new DeploymentError('UNIT_NOT_FOUND', 'Unidade não encontrada.', { statusCode: 404 });
-  if (unit.status !== 'shadow_ready' || Number(unit.latestValidRows || 0) <= 0) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'A unidade não possui snapshot shadow válido.', { statusCode: 409, stage: 'activating_shadow', unitId });
+  if ((!['shadow_ready', 'activating_shadow'].includes(unit.status) && !isShadowActivationFailure(unit)) || Number(unit.latestValidRows || 0) <= 0) throw new DeploymentError('HUB_SHADOW_NOT_READY', 'A unidade não possui snapshot shadow válido.', { statusCode: 409, stage: 'activating_shadow', unitId });
   if (!unit.latestRunId) throw new DeploymentError('HUB_RUN_ID_MISSING', 'A execução não possui um identificador para ativação.', { statusCode: 409, stage: 'activating_shadow', unitId, action: 'Execute uma nova carga antes de ativar o snapshot.' });
   const now = new Date();
   await prisma.$transaction([
@@ -1206,9 +1275,9 @@ export async function activateUnitShadow(deploymentId, unitId, idempotencyKey) {
       lastErrorCode: null, lastErrorMessage: null, retryable: false,
     } }),
   ]);
-  await event(deploymentId, 'hub_activation_requested', { unitId, fromStatus: unit.status, toStatus: 'activating_shadow', metadata: { runId: unit.latestRunId } });
+  await event(deploymentId, 'hub_activation_retry_requested', { unitId, fromStatus: unit.status, toStatus: 'activating_shadow', metadata: { runId: unit.latestRunId } });
   const apiKey = decryptSecret(deployment.sellerApiKeyEncrypted);
-  hub.activateSnapshot(catalogTargets(deployment.environment).hub, apiKey, unit.hubIntegrationId, unit.latestRunId, unitId, `${deploymentId}:${unitId}:${idempotencyKey}`);
+  await dispatchShadowActivation(deployment, unit, apiKey, unit.latestRunId);
   return getDeployment(deploymentId);
 }
 

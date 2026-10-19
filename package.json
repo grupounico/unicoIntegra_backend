@@ -6,12 +6,17 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "catalog:local:staging": "node scripts/start-catalog-staging.mjs",
+    "catalog:local:check": "node scripts/start-catalog-staging.mjs --check",
+    "catalog:local:migrate": "node scripts/migrate-catalog-staging-local.mjs",
     "postinstall": "prisma generate",
     "test": "node --test test/*.test.js",
     "test:catalog:e2e": "node test/catalogDeployment.e2e.mjs",
+    "test:catalog:linx:e2e": "node test/catalogDeployment.linx.e2e.mjs",
     "dev": "nodemon --ignore builds-temporarios --ignore node_modules --ignore src/data/ai-template-workspaces.json src/server.js",
-    "totp": "node --input-type=module -r dotenv/config -e \"import { generateTotpToken } from './src/services/totp.services.js'; console.log(generateTotpToken(process.env.INSTANCE_SERVICE_TOTP_SECRET, { digits: Number(process.env.INSTANCE_SERVICE_TOTP_DIGITS || 6), period: Number(process.env.INSTANCE_SERVICE_TOTP_PERIOD_SECONDS || 30) }));\""
-
+    "totp": "node --input-type=module -r dotenv/config -e \"import { generateTotpToken } from './src/services/totp.services.js'; console.log(generateTotpToken(process.env.INSTANCE_SERVICE_TOTP_SECRET, { digits: Number(process.env.INSTANCE_SERVICE_TOTP_DIGITS || 6), period: Number(process.env.INSTANCE_SERVICE_TOTP_PERIOD_SECONDS || 30) }));\"",
+    "catalog:production:check": "node scripts/check-catalog-production.mjs",
+    "test:catalog:four-erps:e2e": "node test/catalogDeployment.four-erps.e2e.mjs"
   },
   "keywords": [],
   "author": "",

@@ -16,6 +16,7 @@ test('periodic reconciliation checks domains without probing live catalog, inclu
     Date,
     env: { STOREFRONT_RECONCILE_INTERVAL_MS: 300000 },
     catalogTargets: () => ({ storefront: { enabled: true, vercel: { projectId: 'project' } } }),
+    catalogWorkerUnitFilter: () => ({}),
     prisma: {
       clientDeploymentUnit: {
         findMany: async () => units.filter(u => !u.storefrontReleaseVerifiedAt),

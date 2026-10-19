@@ -290,7 +290,7 @@ model ClientDeploymentUnit {
   slug                        String                  @db.VarChar(100)
   isInitial                   Boolean                 @default(false)
   provider                    String                  @default("alpha7") @db.VarChar(30)
-  sourceUnitId                BigInt
+  sourceUnitId                BigInt?
   credentialRefEncrypted      String?
   credentialExpiresAt         DateTime?               @db.Timestamp(6)
   orderWebhookUrlEncrypted    String?
@@ -341,7 +341,8 @@ model ClientDeploymentUnit {
   atenderBemSecretsEncrypted  String?
 
   @@unique([deploymentId, code])
-  @@unique([deploymentId, provider, sourceUnitId])
+  // A unicidade legada Alpha7 é mantida por índice parcial na migration SQL.
+  @@index([deploymentId, provider, sourceUnitId])
   // IDs de unidade pertencem ao banco de cada ambiente do Hub. Staging e
   // producao podem gerar o mesmo valor numerico para lojas diferentes.
   @@index([hubSellerUnitId])

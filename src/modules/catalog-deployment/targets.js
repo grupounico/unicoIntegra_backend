@@ -23,6 +23,10 @@ export function catalogTargets(environment) {
     });
   }
   const production = selected === 'production';
+  const localStorefront = env.CATALOG_LOCAL_STOREFRONT_BASE_URL;
+  if (localStorefront && (production || process.env.NODE_ENV === 'production' || !env.CATALOG_LOCAL_STAGING_SERVER)) {
+    throw new DeploymentError('LOCAL_STOREFRONT_REQUIRES_ISOLATED_STAGING', 'A loja local exige o servidor isolado de staging.', { statusCode: 503, stage: 'configuration' });
+  }
   return {
     environment: selected,
     hub: {
@@ -38,6 +42,8 @@ export function catalogTargets(environment) {
       authorization: production ? env.BANCO_UNICO_PRODUCTION_AUTHORIZATION || env.BANCO_UNICO_AUTHORIZATION : env.BANCO_UNICO_STAGING_AUTHORIZATION,
     },
     storefront: {
+      driver: localStorefront ? 'local' : 'vercel',
+      localBaseUrl: localStorefront,
       enabled: env.STOREFRONT_PROVISIONING_ENABLED,
       domainPrefix: env.STOREFRONT_DOMAIN_PREFIX,
       domainSuffix: env.STOREFRONT_DOMAIN_SUFFIX,
