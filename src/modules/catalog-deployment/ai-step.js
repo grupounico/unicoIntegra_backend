@@ -1,4 +1,5 @@
 import { DeploymentError } from './errors.js';
+import { allowedUrl } from './adapters/mcp.client.js';
 
 // Etapa "Criação da IA", depois do AtenderBem. Usa o mesmo instalador por template das
 // demais IAs (createManagedIntegratedAi) com a conta de serviço da instância: o operador
@@ -10,11 +11,11 @@ function fail(code, message, statusCode = 409) {
   throw new DeploymentError(code, message, { statusCode, stage: 'ai_creation' });
 }
 
-export function instanceFromMcpUrl(mcpUrl) {
-  try { return new URL(mcpUrl).origin; } catch { return null; }
+export function instanceFromMcpUrl(mcpUrl, environment = process.env) {
+  return new URL(allowedUrl(mcpUrl, 'mcp', environment)).origin;
 }
 
-export function aiStep({ database, installers }) {
+export function aiStep({ database, installers, environment = process.env }) {
   async function save(unit, before, ai, eventType, actor) {
     const after = { ...before, ai };
     await database.$transaction(async tx => {
@@ -35,12 +36,13 @@ export function aiStep({ database, installers }) {
     const unit = await database.clientDeploymentUnit.findFirst({ where: { id: unitId, deploymentId } });
     if (!unit) fail('UNIT_NOT_FOUND', 'Unidade não encontrada.', 404);
     const config = unit.atenderBemConfig || {};
-    const instance = instanceFromMcpUrl(config.mcpUrl);
-    if (!instance || !config.groupId) fail('ATENDERBEM_CONFIG_REQUIRED', 'Conclua a etapa AtenderBem (instância e grupo de produtos) antes de criar a IA.');
-    if (config.import && config.import.status !== 'completed') fail('ATENDERBEM_IMPORT_PENDING', 'Aguarde a importação do catálogo terminar antes de criar a IA.');
+    if (!config.mcpUrl || !config.groupId) fail('ATENDERBEM_CONFIG_REQUIRED', 'Conclua a etapa AtenderBem (instância e grupo de produtos) antes de criar a IA.');
+    // Validate the stored destination before claiming work or sending the service account.
+    const instance = instanceFromMcpUrl(config.mcpUrl, environment);
     const current = config.ai;
     if (current?.status === 'created') fail('AI_ALREADY_CREATED', `A IA já foi criada nesta unidade (assistente ${current.assistantId}).`);
     if (current?.status === 'creating' && Date.now() - Date.parse(current.startedAt) < STALE_MS) fail('AI_CREATION_BUSY', 'A criação da IA está em andamento. Aguarde alguns minutos.');
+    if (config.import?.status !== 'completed') fail('ATENDERBEM_IMPORT_PENDING', 'Aguarde a importação do catálogo terminar antes de criar a IA.');
 
     const name = String(input.name || '').trim() || `IA de Venda - ${unit.name}`;
     const signatureName = String(input.signatureName || '').trim() || unit.name;

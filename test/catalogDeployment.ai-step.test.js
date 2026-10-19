@@ -5,7 +5,7 @@ import { aiStep, instanceFromMcpUrl } from '../src/modules/catalog-deployment/ai
 import { buildManagedAiTemplateVariables, createManagedAiConfigSnapshot, getManagedAiTemplatePaths, getManagedAiInstallOrder } from '../src/services/aiProviderCatalog.js';
 import { parseTemplateContent } from '../src/services/TemplateService.js';
 
-function fixture(config = { mcpUrl: 'https://cliente.atenderbem.com/mcp', groupId: 3, import: { status: 'completed' } }) {
+function fixture(config = { mcpUrl: 'https://cliente.atenderbem.com/mcp', groupId: 3, import: { status: 'completed' } }, environment = {}) {
   let unit = { id: 'u1', deploymentId: 'd1', name: 'Farmácia Teste', atenderBemConfig: config };
   const events = []; const calls = [];
   const database = {
@@ -21,7 +21,7 @@ function fixture(config = { mcpUrl: 'https://cliente.atenderbem.com/mcp', groupI
   database.$transaction = fn => fn(database);
   const control = { fail: false };
   const installers = { venda: async input => { calls.push(input); if (control.fail) throw new Error('boom'); return { id: 77, supportFlows: { uraIaId: '9' } }; } };
-  return { step: aiStep({ database, installers }), calls, events, control, unit: () => unit };
+  return { step: aiStep({ database, installers, environment }), calls, events, control, unit: () => unit };
 }
 
 test('creates the sales AI from the unit data, without operator credentials', async () => {
@@ -73,4 +73,34 @@ test('venda templates render to valid payloads with client data and installed ID
     const raw = JSON.stringify(render(key));
     assert.doesNotMatch(raw, /minasmais|82e359e05cf0/); JSON.parse(render(key).options);
   }
+});
+
+
+test('AI rejects unapproved MCP destinations before any claim or installation', async () => {
+  for (const mcpUrl of ['https://external.example/mcp', 'http://cliente.atenderbem.com/mcp', 'https://cliente.atenderbem.com:8443/mcp', 'https://cliente.atenderbem.com/wrong-path', 'https://cliente.atenderbem.com/mcp?token=private', 'https://user:pass@cliente.atenderbem.com/mcp']) {
+    const config = { mcpUrl, groupId: 3, import: { status: 'completed' } };
+    const f = fixture(config);
+    await assert.rejects(f.step.createAi('d1', 'u1'), { code: mcpUrl.endsWith('/wrong-path') ? 'ATENDERBEM_CONNECTION_ERROR' : 'ATENDERBEM_DESTINATION_NOT_ALLOWED' });
+    assert.equal(f.calls.length, 0);
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.unit().atenderBemConfig, config);
+  }
+});
+
+test('AI requires an explicitly completed import before any claim or installation', async () => {
+  for (const progress of [undefined, null, {}, { status: 'running' }, { status: 'failed' }]) {
+    const config = { mcpUrl: 'https://cliente.atenderbem.com/mcp', groupId: 3, ...(progress === undefined ? {} : { import: progress }) };
+    const f = fixture(config);
+    await assert.rejects(f.step.createAi('d1', 'u1'), { code: 'ATENDERBEM_IMPORT_PENDING' });
+    assert.equal(f.calls.length, 0);
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.unit().atenderBemConfig, config);
+  }
+});
+
+test('AI accepts an explicitly approved custom MCP host with a completed import', async () => {
+  const f = fixture({ mcpUrl: 'https://approved.example/mcp', groupId: 3, import: { status: 'completed' } }, { CATALOG_MCP_ALLOWED_HOSTS: 'approved.example' });
+  assert.equal((await f.step.createAi('d1', 'u1')).status, 'created');
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].instance, 'https://approved.example');
 });

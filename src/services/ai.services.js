@@ -174,7 +174,7 @@ async function buildManagedIvrPayload(provider, componentKey, installationRecord
   });
 }
 
-async function createManagedIntegratedAi({ provider, auth, configInput }) {
+async function createManagedIntegratedAi({ provider, auth, configInput, loginOptions }) {
   const installArtifacts = MANAGED_PROVIDER_INSTALLERS[provider];
   if (!installArtifacts) {
     throw new Error(`Provider de IA nao suportado: ${provider}`);
@@ -192,6 +192,7 @@ async function createManagedIntegratedAi({ provider, auth, configInput }) {
     auth.username,
     auth.password,
     auth.code2fa,
+    loginOptions,
   );
 
   const aiData = await createAi(auth.instance, token);
@@ -417,6 +418,7 @@ export async function createAiTrier({
 export async function createAiVenda({ instance, username, password, code2fa, name, nome_cliente, signatureName, productsGroupId }) {
   return createManagedIntegratedAi({
     provider: 'venda',
+    loginOptions: { maxRedirects: 0 },
     auth: { instance, username, password, code2fa },
     configInput: { name, nome_cliente, signatureName, productsGroupId },
   });
