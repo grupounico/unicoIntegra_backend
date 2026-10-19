@@ -18,6 +18,7 @@ router.put('/:deploymentId/units/:unitId/atenderbem', (req, res, next) => { res.
 router.post('/:deploymentId/units/:unitId/atenderbem/group', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.createAtenderBemGroupHandler);
 router.post('/:deploymentId/units/:unitId/atenderbem/import', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.startAtenderBemImportHandler);
 router.post('/:deploymentId/units/:unitId/atenderbem/import/status', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.checkAtenderBemImportHandler);
+router.post('/:deploymentId/units/:unitId/ai', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.createAiHandler);
 router.post('/:deploymentId/start', controller.start);
 router.post('/:deploymentId/refresh-runs', controller.refreshRuns);
 router.post('/:deploymentId/retry', controller.retry);
