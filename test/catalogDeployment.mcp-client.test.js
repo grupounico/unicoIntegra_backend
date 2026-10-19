@@ -47,3 +47,63 @@ test('host restrictions and result redaction protect credentials', () => {
   assert.ok(!JSON.stringify(result).includes('secret')); assert.ok(!JSON.stringify(result).includes('signature'));
   assert.throws(() => validateArguments({ type: 'object', properties: {} }, { unexpected: true }), /não foi confirmado/);
 });
+test('all direct AtenderBem tenants are allowed by default and with a legacy MCP host list', () => {
+  for (const environment of [{}, { CATALOG_MCP_ALLOWED_HOSTS: '' }, { CATALOG_MCP_ALLOWED_HOSTS: 'ambientesdetesteunicocontato.atenderbem.com' }]) {
+    for (const host of ['superpopular.atenderbem.com', 'drogasara.atenderbem.com', 'novo-cliente-123.atenderbem.com']) {
+      assert.equal(allowedUrl(`https://${host}/mcp`, 'mcp', environment), `https://${host}/mcp`);
+    }
+  }
+  assert.equal(allowedUrl('https://SUPERPOPULAR.atenderbem.com:443/mcp/', 'mcp', {}), 'https://superpopular.atenderbem.com/mcp/');
+});
+test('automatic MCP access checks the tenant label and the exact AtenderBem domain boundary', () => {
+  for (const host of ['atenderbem.com', 'superpopularatenderbem.com', 'superpopular.atenderbem.com.evil.example',
+    'superpopular.atenderbem.example', 'nested.superpopular.atenderbem.com', '-cliente.atenderbem.com',
+    'cliente-.atenderbem.com', 'cliente_invalido.atenderbem.com', `${'a'.repeat(64)}.atenderbem.com`,
+    'superpopular.atenderbem.com.', 'localhost', '127.0.0.1', '[::1]']) {
+    assert.throws(() => allowedUrl(`https://${host}/mcp`, 'mcp', {}), { code: 'ATENDERBEM_DESTINATION_NOT_ALLOWED' }, host);
+  }
+});
+test('automatic MCP hosts still require HTTPS, default port, and no credentials, query or fragment', () => {
+  for (const url of ['http://superpopular.atenderbem.com/mcp', 'https://superpopular.atenderbem.com:8443/mcp',
+    'https://user@superpopular.atenderbem.com/mcp', 'https://user:password@superpopular.atenderbem.com/mcp',
+    'https://superpopular.atenderbem.com/mcp?token=secret', 'https://superpopular.atenderbem.com/mcp#fragment']) {
+    assert.throws(() => allowedUrl(url, 'mcp', {}), { code: 'ATENDERBEM_DESTINATION_NOT_ALLOWED' }, url);
+  }
+  for (const path of ['/', '/api/mcp', '/mcp/other', '/mcp//']) {
+    assert.throws(() => allowedUrl(`https://superpopular.atenderbem.com${path}`, 'mcp', {}), /terminar em \/mcp/, path);
+  }
+});
+test('custom MCP hosts remain explicit exact additions without replacing automatic tenant access', () => {
+  const environment = { CATALOG_MCP_ALLOWED_HOSTS: ' CUSTOM.example.org, another.example.org ' };
+  assert.equal(allowedUrl('https://custom.example.org/mcp', 'mcp', environment), 'https://custom.example.org/mcp');
+  assert.equal(allowedUrl('https://another.example.org/mcp', 'mcp', environment), 'https://another.example.org/mcp');
+  assert.equal(allowedUrl('https://superpopular.atenderbem.com/mcp', 'mcp', environment), 'https://superpopular.atenderbem.com/mcp');
+  for (const host of ['sub.custom.example.org', 'custom.example.org.evil.example', 'unlisted.example.org']) {
+    assert.throws(() => allowedUrl(`https://${host}/mcp`, 'mcp', environment), /não permitido/, host);
+  }
+  assert.throws(() => allowedUrl('https://custom.example.org/mcp', 'mcp', { CATALOG_MCP_ALLOWED_HOSTS: '*.example.org' }), /não permitido/);
+  assert.throws(() => allowedUrl('http://custom.example.org/mcp', 'mcp', environment), /não permitido/);
+});
+test('feed hosts stay restricted independently of automatic and additional MCP hosts', () => {
+  const feed = 'https://unicocontato.tech/banco-unico/api/products/catalog/feed.csv';
+  assert.equal(allowedUrl(feed, 'feed', {}), feed);
+  const environment = { CATALOG_MCP_ALLOWED_HOSTS: 'custom.example.org', CATALOG_FEED_ALLOWED_HOSTS: 'feed.example.org' };
+  assert.equal(allowedUrl('https://feed.example.org/feed.csv', 'feed', environment), 'https://feed.example.org/feed.csv');
+  for (const host of ['superpopular.atenderbem.com', 'custom.example.org', 'unicocontato.tech', 'sub.feed.example.org']) {
+    assert.throws(() => allowedUrl(`https://${host}/feed.csv`, 'feed', environment), /não permitido/, host);
+  }
+  assert.throws(() => allowedUrl('https://superpopular.atenderbem.com/feed.csv', 'feed', {}), /não permitido/);
+});
+test('new tenant MCP requests keep redirect rejection and send credentials only to the selected instance', async () => {
+  const calls = [];
+  const client = createMcpClient({ ...config, mcpUrl: 'https://superpopular.atenderbem.com/mcp' }, {
+    fetchImpl: mockTransport(calls), environment: { CATALOG_MCP_ALLOWED_HOSTS: 'ambientesdetesteunicocontato.atenderbem.com' },
+  });
+  await client.tools();
+  assert.equal(calls.length, 3);
+  for (const { url, init } of calls) {
+    assert.equal(url, 'https://superpopular.atenderbem.com/mcp');
+    assert.equal(init.redirect, 'error');
+    assert.equal(init.headers.Authorization, `Bearer ${config.mcpKey}`);
+  }
+});
