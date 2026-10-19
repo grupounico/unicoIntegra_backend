@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export async function loginInstance(instance, username, password, code) {
+export async function loginInstance(instance, username, password, code, loginOptions) {
   const postData = {
     username: username, 
     password: password,
@@ -10,6 +10,7 @@ export async function loginInstance(instance, username, password, code) {
   
   try {
     const loginResponse = await axios.post(`${instance}/login`, postData, {
+      ...(loginOptions?.maxRedirects === 0 ? { maxRedirects: 0 } : {}),
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json', // Solicita explicitamente JSON ao servidor

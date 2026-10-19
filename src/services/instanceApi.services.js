@@ -8,6 +8,7 @@ export async function authenticateInstance(
   username,
   password,
   code,
+  loginOptions,
 ) {
   const resolved = resolveInstanceExecutionCredentials({
     username,
@@ -20,6 +21,7 @@ export async function authenticateInstance(
     resolved.username,
     resolved.password,
     resolved.code2fa,
+    loginOptions,
   );
   return loginData.token;
 }
