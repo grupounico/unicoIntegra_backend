@@ -43,6 +43,7 @@ test('cadastro, correção e recuperação usam os quatro contratos sem expor se
     if (!deployment || (where.id && where.id !== deployment.id) || (where.idempotencyKey && where.idempotencyKey !== deployment.idempotencyKey)) return null;
     return view();
   };
+  prisma.clientDeployment.findFirst = async () => null;
   prisma.clientDeployment.create = async ({ data }) => {
     const { units: nested, ...rest } = data;
     deployment = { id: 'deployment-1', status: 'draft', ...rest };
