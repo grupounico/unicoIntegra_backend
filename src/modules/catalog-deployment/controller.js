@@ -28,6 +28,7 @@ export async function revealSellerToken(req, res) {
   }
 }
 export const updateUnit = handler((req) => service.updateDeploymentUnit(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
+export const addUnit = handler((req) => service.addDeploymentUnit(req.params.deploymentId, req.body || {}, actor(req)), 202);
 export const saveAtenderBem = handler((req) => saveAtenderBemConfiguration(req.params.deploymentId, req.params.unitId, req.body || {}, actor(req)));
 export const createAtenderBemGroupHandler = handler((req) => createAtenderBemGroup(req.params.deploymentId, req.params.unitId, actor(req)));
 export const startAtenderBemImportHandler = handler((req) => startAtenderBemImport(req.params.deploymentId, req.params.unitId, actor(req)), 202);

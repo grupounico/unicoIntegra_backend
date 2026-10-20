@@ -13,6 +13,7 @@ router.get('/:deploymentId', controller.get);
 router.get('/:deploymentId/events', controller.events);
 router.get('/:deploymentId/stream', controller.stream);
 router.post('/:deploymentId/seller-token', controller.revealSellerToken);
+router.post('/:deploymentId/units', controller.addUnit);
 router.patch('/:deploymentId/units/:unitId', controller.updateUnit);
 router.put('/:deploymentId/units/:unitId/atenderbem', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.saveAtenderBem);
 router.post('/:deploymentId/units/:unitId/atenderbem/group', (req, res, next) => { res.set('Cache-Control', 'no-store, private'); next(); }, controller.createAtenderBemGroupHandler);

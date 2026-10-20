@@ -74,6 +74,30 @@ async function trackedStep(deploymentId, unitId, step, operation, { idempotencyK
 }
 
 function includeAll() { return { units: { orderBy: { createdAt: 'asc' } }, assets: { orderBy: { type: 'asc' } }, steps: { orderBy: { startedAt: 'desc' }, take: 200 }, events: { orderBy: { createdAt: 'desc' }, take: 200 } }; }
+async function findReusableSeller(group, environment, excludeDeploymentId = null) {
+  const reusableSeller = await prisma.clientDeployment.findFirst({
+    where: {
+      environment,
+      groupCnpj: group.cnpj,
+      hubSellerId: { not: null },
+      sellerApiKeyEncrypted: { not: null },
+      ...(excludeDeploymentId ? { NOT: { id: excludeDeploymentId } } : {}),
+    },
+    orderBy: [{ updatedAt: 'desc' }, { createdAt: 'asc' }],
+    select: { id: true, groupName: true, username: true, hubSellerId: true, sellerApiKeyEncrypted: true },
+  });
+  if (reusableSeller && (
+    reusableSeller.groupName !== group.nome
+    || reusableSeller.username.toLocaleLowerCase('pt-BR') !== group.username.toLocaleLowerCase('pt-BR')
+  )) {
+    throw new DeploymentError(
+      'SELLER_GROUP_IDENTITY_MISMATCH',
+      `O CNPJ do grupo já está vinculado a “${reusableSeller.groupName}” (@${reusableSeller.username}) no Hub.`,
+      { statusCode: 409, stage: 'validation', action: 'Use o mesmo nome de grupo e usuário da implantação existente para criar as filiais dentro desse seller.' },
+    );
+  }
+  return reusableSeller;
+}
 function deploymentProgress(units = [], flowMode = 'full') {
   const values = units.map((unit) => UNIT_PROGRESS[unit.status] ?? 0);
   const percent = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
@@ -133,9 +157,11 @@ export async function createDeployment(payload, idempotencyKey, correlationId) {
     if (existing.payloadHash !== payloadHash && !compatibleLegacyHash) throw new DeploymentError('IDEMPOTENCY_CONFLICT', 'A chave de idempotência já foi usada com outro payload ou ambiente.', { statusCode: 409, stage: 'validation' });
     return formatDeployment(existing);
   }
+  const reusableSeller = await findReusableSeller(normalized.group, environment);
   const deployment = await prisma.clientDeployment.create({ data: {
     idempotencyKey, payloadHash, groupCnpj: normalized.group.cnpj, groupName: normalized.group.nome,
     username: normalized.group.username, flowMode: normalized.flowMode, environment, requestedBy: normalized.requestedBy, correlationId,
+    ...(reusableSeller ? { hubSellerId: reusableSeller.hubSellerId, sellerApiKeyEncrypted: reusableSeller.sellerApiKeyEncrypted } : {}),
     inputSnapshot: sanitizeSnapshot(normalized),
     units: { create: normalized.units.map((unit) => ({ code: unit.code, name: unit.name, cnpj: unit.cnpj, slug: unit.slug,
       isInitial: unit.initial, provider: unit.provider, sourceUnitId: unit.sourceUnitId === null ? null : BigInt(unit.sourceUnitId),
@@ -144,6 +170,13 @@ export async function createDeployment(payload, idempotencyKey, correlationId) {
     ...(normalized.flowMode === 'full' ? { assets: { create: ASSET_TYPES.map((type) => ({ type })) } } : {}),
   }, include: includeAll() });
   await event(deployment.id, 'deployment_created', { toStatus: 'draft', createdBy: normalized.requestedBy, metadata: { environment } });
+  if (reusableSeller) {
+    await event(deployment.id, 'hub_seller_reused', {
+      toStatus: 'draft',
+      createdBy: normalized.requestedBy,
+      metadata: { sellerDeploymentId: reusableSeller.id, hubSellerId: String(reusableSeller.hubSellerId) },
+    });
+  }
   return formatDeployment(deployment);
 }
 
@@ -178,6 +211,108 @@ export async function revealSellerToken(id, actor) {
 }
 
 const EDITABLE_DEPLOYMENT_STATUSES = new Set(['draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required']);
+
+const ADD_UNIT_DEPLOYMENT_STATUSES = new Set([
+  'draft', 'failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required',
+  'awaiting_activation', 'completed',
+]);
+
+export async function addDeploymentUnit(deploymentId, payload, actor) {
+  const deployment = await prisma.clientDeployment.findUnique({ where: { id: deploymentId }, include: { units: true } });
+  if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
+  if (!ADD_UNIT_DEPLOYMENT_STATUSES.has(deployment.status) || deployment.workerId) {
+    throw new DeploymentError('DEPLOYMENT_BUSY', 'Aguarde o processamento atual terminar antes de adicionar outra unidade.', {
+      statusCode: 409, stage: 'adding_unit', action: 'Atualize o acompanhamento e tente novamente quando a implantação estiver parada.',
+    });
+  }
+
+  const normalized = validateCreatePayload({
+    flowMode: deployment.flowMode,
+    group: { cnpj: deployment.groupCnpj, nome: deployment.groupName, username: deployment.username },
+    requestedBy: actor,
+    units: [{ ...payload, initial: true }],
+  }).units[0];
+  normalized.initial = false;
+
+  const duplicateCode = await prisma.clientDeploymentUnit.findFirst({
+    where: { deploymentId, code: normalized.code }, select: { id: true },
+  });
+  if (duplicateCode) throw new DeploymentError('DUPLICATE_UNIT_CODE', 'Este código já está em uso por outra unidade do grupo.', { statusCode: 409, stage: 'adding_unit' });
+  if (normalized.provider === 'alpha7') {
+    const duplicateSource = await prisma.clientDeploymentUnit.findFirst({
+      where: { deploymentId, provider: 'alpha7', sourceUnitId: BigInt(normalized.sourceUnitId) }, select: { id: true },
+    });
+    if (duplicateSource) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', 'Este ID do Alpha7 já está em uso por outra unidade do grupo.', { statusCode: 409, stage: 'adding_unit' });
+  }
+
+  let sellerToReuse = null;
+  if (!deployment.hubSellerId) {
+    sellerToReuse = await findReusableSeller({ cnpj: deployment.groupCnpj, nome: deployment.groupName, username: deployment.username }, deployment.environment, deployment.id);
+  }
+
+  const snapshot = sanitizeSnapshot({
+    flowMode: deployment.flowMode,
+    group: { cnpj: deployment.groupCnpj, nome: deployment.groupName, username: deployment.username },
+    units: [normalized],
+  });
+  const existingSnapshot = deployment.inputSnapshot && typeof deployment.inputSnapshot === 'object' ? deployment.inputSnapshot : {};
+  const nextSnapshot = {
+    ...existingSnapshot,
+    flowMode: deployment.flowMode,
+    group: snapshot.group,
+    units: [...(Array.isArray(existingSnapshot.units) ? existingSnapshot.units : []), ...snapshot.units],
+  };
+  const requeue = deployment.status !== 'draft';
+  const nextDeploymentState = {
+    inputSnapshot: nextSnapshot,
+    ...(sellerToReuse ? { hubSellerId: sellerToReuse.hubSellerId, sellerApiKeyEncrypted: sellerToReuse.sellerApiKeyEncrypted } : {}),
+    ...(requeue ? {
+      status: 'queued', currentStage: 'queued', startedAt: deployment.startedAt || new Date(), finishedAt: null,
+      lastErrorCode: null, lastErrorMessage: null, retryable: false,
+    } : {}),
+  };
+  const unitData = {
+    deploymentId, code: normalized.code, name: normalized.name, cnpj: normalized.cnpj, slug: normalized.slug,
+    isInitial: false, provider: normalized.provider,
+    sourceUnitId: normalized.sourceUnitId === null ? null : BigInt(normalized.sourceUnitId),
+    credentialRefEncrypted: normalized.credentialRef ? encryptSecret(normalized.credentialRef) : null,
+    orderWebhookUrlEncrypted: normalized.orderWebhookUrl ? encryptSecret(normalized.orderWebhookUrl) : null,
+    publicationMode: normalized.publicationMode, pageSize: normalized.pageSize,
+    validEanDropThresholdBps: normalized.validEanDropThresholdBps,
+  };
+  let createdUnit;
+  try {
+    createdUnit = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.clientDeployment.updateMany({
+        where: { id: deploymentId, status: deployment.status, workerId: null },
+        data: nextDeploymentState,
+      });
+      if (!claimed.count) throw new DeploymentError('DEPLOYMENT_BUSY', 'A implantação começou a processar enquanto a unidade era adicionada.', {
+        statusCode: 409, stage: 'adding_unit', action: 'Atualize o acompanhamento e tente novamente quando o processamento terminar.',
+      });
+      return tx.clientDeploymentUnit.create({ data: unitData });
+    });
+  } catch (error) {
+    if (error?.code === 'P2002') {
+      const target = Array.isArray(error.meta?.target) ? error.meta.target.join(',') : String(error.meta?.target || '');
+      if (target.includes('sourceUnitId')) throw new DeploymentError('DUPLICATE_SOURCE_UNIT_ID', 'Este ID do Alpha7 já está em uso por outra unidade do grupo.', { statusCode: 409, stage: 'adding_unit' });
+      throw new DeploymentError('DUPLICATE_UNIT_CODE', 'Este código já está em uso por outra unidade do grupo.', { statusCode: 409, stage: 'adding_unit' });
+    }
+    throw error;
+  }
+
+  await event(deploymentId, 'unit_added', {
+    unitId: createdUnit.id, fromStatus: null, toStatus: 'pending', createdBy: actor,
+    metadata: { code: normalized.code, provider: normalized.provider, hasCredential: Boolean(normalized.credentialRef), requeued: requeue },
+  });
+  if (sellerToReuse) {
+    await event(deploymentId, 'hub_seller_reused', {
+      fromStatus: deployment.status, toStatus: requeue ? 'queued' : 'draft', createdBy: actor,
+      metadata: { sellerDeploymentId: sellerToReuse.id, hubSellerId: String(sellerToReuse.hubSellerId) },
+    });
+  }
+  return getDeployment(deploymentId);
+}
 
 export async function updateDeploymentUnit(deploymentId, unitId, payload, actor) {
   const deployment = await prisma.clientDeployment.findUnique({ where: { id: deploymentId } });
@@ -833,9 +968,25 @@ export async function processDeployment(id) {
 }
 
 export async function retryDeployment(id, actor) {
-  const deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true } });
+  let deployment = await prisma.clientDeployment.findUnique({ where: { id }, include: { units: true } });
   if (!deployment) throw new DeploymentError('DEPLOYMENT_NOT_FOUND', 'Implantação não encontrada.', { statusCode: 404 });
   if (!['failed', 'partially_failed', 'monitoring_timeout', 'reconciliation_required'].includes(deployment.status)) return getDeployment(id);
+  if (!deployment.hubSellerId) {
+    const reusableSeller = await findReusableSeller({ cnpj: deployment.groupCnpj, nome: deployment.groupName, username: deployment.username }, deployment.environment, id);
+    if (reusableSeller) {
+      await prisma.clientDeployment.update({ where: { id }, data: {
+        hubSellerId: reusableSeller.hubSellerId,
+        sellerApiKeyEncrypted: reusableSeller.sellerApiKeyEncrypted,
+      } });
+      await event(id, 'hub_seller_reused', {
+        fromStatus: deployment.status,
+        toStatus: deployment.status,
+        createdBy: actor,
+        metadata: { sellerDeploymentId: reusableSeller.id, hubSellerId: String(reusableSeller.hubSellerId) },
+      });
+      deployment = { ...deployment, hubSellerId: reusableSeller.hubSellerId, sellerApiKeyEncrypted: reusableSeller.sellerApiKeyEncrypted };
+    }
+  }
   for (const unit of deployment.units.filter((item) => ['failed', 'reconciliation_required'].includes(item.status) || item.lastErrorCode)) {
     const resume = await resumedUnitStatus(deployment, unit);
     await prisma.clientDeploymentUnit.update({ where: { id: unit.id }, data: { status: resume, lastErrorCode: null, lastErrorMessage: null, retryable: false } });
