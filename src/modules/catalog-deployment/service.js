@@ -436,8 +436,10 @@ export async function listDeployments(query = {}) {
   const page = Math.max(1, Number(query.page) || 1); const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 20));
   const where = { ...(query.status ? { status: String(query.status) } : {}), ...(query.environment ? { environment: String(query.environment).toLowerCase() } : {}), ...(query.cnpj ? { groupCnpj: { contains: String(query.cnpj).replace(/\D/g, '') } } : {}) };
   if (query.search) where.OR = [{ groupName: { contains: String(query.search), mode: 'insensitive' } }, { username: { contains: String(query.search), mode: 'insensitive' } }];
-  const [data, totalItems] = await Promise.all([prisma.clientDeployment.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * pageSize, take: pageSize, include: { units: true } }), prisma.clientDeployment.count({ where })]);
-  return { data: data.map(formatDeployment), meta: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize) } };
+  const [data, totalItems, statuses] = await Promise.all([prisma.clientDeployment.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * pageSize, take: pageSize, include: { units: true } }), prisma.clientDeployment.count({ where }), prisma.clientDeployment.groupBy({ by: ['status'], where, _count: { _all: true } })]);
+  const count = (values) => statuses.filter(({ status }) => values.includes(status)).reduce((total, { _count }) => total + _count._all, 0);
+  const summary = { inProgress: count(['queued', 'provisioning_hub', 'validating_hub_catalog', 'provisioning_unicommerce', 'validating_unicommerce', 'importing_banco_unico', 'waiting_storefront_release', 'waiting_storefront']), awaitingAction: count(['awaiting_activation', 'reconciliation_required', 'monitoring_timeout']), completed: count(['completed']) };
+  return { data: data.map(formatDeployment), meta: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize), summary } };
 }
 
 export async function startDeployment(id, actor) {
