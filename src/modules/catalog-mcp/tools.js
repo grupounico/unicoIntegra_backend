@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { DeploymentError, publicError } from '../catalog-deployment/errors.js';
+import { allowedUrl } from '../catalog-deployment/adapters/mcp.client.js';
 import { connectionUrl } from './connection.js';
 import { summarizeDeployment } from './summary.js';
 
@@ -140,6 +141,8 @@ export function createCatalogMcpServer(services) {
     },
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ deploymentId, unitId, mcpUrl, mcpKey, feedKey, feedAuth, group, requestedBy }) => {
+    // The service only checks the host when the group is created; refuse a foreign instance before storing it.
+    allowedUrl(mcpUrl, 'mcp');
     await services.saveAtenderBemConfiguration(deploymentId, unitId, { mcpUrl, mcpKey, feedKey, feedAuth, groupMode: group.mode, groupName: group.mode === 'create' ? group.name : '', groupId: group.mode === 'existing' ? group.id : null }, actor(requestedBy));
     return summary(deploymentId);
   });

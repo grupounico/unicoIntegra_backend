@@ -92,6 +92,15 @@ test('configuração do AtenderBem converte o grupo para o formato do serviço',
   assert.equal(parse(result).nextAction.tool, 'atenderbem_create_group');
 });
 
+test('instância fora do AtenderBem é recusada antes de gravar', async () => {
+  let saved = false;
+  const client = await connect({ saveAtenderBemConfiguration: async () => { saved = true; }, getDeployment: async () => deployment() });
+  const result = await client.callTool({ name: 'atenderbem_configure_unit', arguments: { deploymentId: DEPLOYMENT_ID, unitId: UNIT_ID, mcpUrl: 'https://evil.example.com/mcp', mcpKey: 'm', feedKey: 'f', group: { mode: 'create', name: 'farma' }, requestedBy: 'op', confirm: true } });
+  assert.equal(result.isError, true);
+  assert.equal(parse(result).code, 'ATENDERBEM_DESTINATION_NOT_ALLOWED');
+  assert.equal(saved, false);
+});
+
 test('endpoint HTTP fica desligado sem chave e recusa chave errada', async (t) => {
   const services = { getDeployment: async () => deployment() };
   const listen = (environment) => new Promise((resolve) => {
