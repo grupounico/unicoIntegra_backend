@@ -9,6 +9,11 @@ class MysqlConnectionTestError extends Error {
 
 function publicMysqlError(error) {
   if (error instanceof MysqlConnectionTestError) return error;
+  if (error?.code === 'ER_SECURE_TRANSPORT_REQUIRED' || /insecure transport|require_secure_transport/i.test(String(error?.message || ''))) {
+    const mapped = new MysqlConnectionTestError('O servidor MySQL exige conexão segura (SSL).');
+    mapped.sslRequired = true;
+    return mapped;
+  }
   const messages = {
     ENOTFOUND: 'Host não encontrado. Verifique o endereço informado.',
     ECONNREFUSED: 'Conexão recusada. Verifique host, porta e firewall.',

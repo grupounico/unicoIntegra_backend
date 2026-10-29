@@ -175,7 +175,23 @@ async function findBusinessUnitByCnpj(client, cnpj) {
   }
 }
 
+// Servers that only accept encrypted connections reject plain ones with these messages.
+const SSL_REQUIRED_PATTERN = /no encryption|SSL off|SSL connection is required|insecure transport|require_secure_transport/i;
+const TLS_CERTIFICATE_ERRORS = ['SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID'];
+
+export function isSslRequiredError(error) {
+  return error?.code === 'ER_SECURE_TRANSPORT_REQUIRED' || SSL_REQUIRED_PATTERN.test(String(error?.message || ''));
+}
+
 function mapConnectionError(error) {
+  if (isSslRequiredError(error)) {
+    const mapped = createDatabaseError('O servidor exige conexão segura (SSL).', error.statusCode || 400);
+    mapped.sslRequired = true;
+    return mapped;
+  }
+  if (TLS_CERTIFICATE_ERRORS.includes(error.code)) {
+    return createDatabaseError('O servidor exige conexão segura (SSL), mas o certificado não pôde ser validado.', error.statusCode || 400);
+  }
   const knownErrors = {
     ENOTFOUND: 'Host não encontrado. Verifique o endereço informado.',
     ECONNREFUSED: 'Conexão recusada. Verifique host, porta e firewall.',
@@ -388,9 +404,21 @@ export async function createDatabase(name) {
   }
 }
 
+// Tries the connection as informed; when the server demands SSL, retries once with it and
+// reports sslAutoEnabled so the caller can store the encrypted connection.
 export async function testDatabaseConnection(config) {
   const normalizedConfig = normalizeConnectionConfig(config);
-  if (normalizedConfig.driver === 'mysql') return testMysqlDatabaseConnection(normalizedConfig);
+  const attempt = normalizedConfig.driver === 'mysql' ? testMysqlDatabaseConnection : testPostgresConnection;
+  try {
+    return await attempt(normalizedConfig);
+  } catch (error) {
+    if (normalizedConfig.ssl || !error.sslRequired) throw error;
+    const result = await attempt({ ...normalizedConfig, ssl: true });
+    return { ...result, details: { ...result.details, ssl: true, sslAutoEnabled: true } };
+  }
+}
+
+async function testPostgresConnection(normalizedConfig) {
   const client = new Client({
     host: normalizedConfig.host,
     database: normalizedConfig.database,
