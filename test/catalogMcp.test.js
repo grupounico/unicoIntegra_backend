@@ -101,6 +101,13 @@ test('instância fora do AtenderBem é recusada antes de gravar', async () => {
   assert.equal(saved, false);
 });
 
+test('falha de conexão com o banco vira resultado, não erro de entrada', async () => {
+  const client = await connect({ testDatabaseConnection: async () => { throw new Error('Conexão recusada. Verifique host, porta e firewall.'); } });
+  const result = await client.callTool({ name: 'catalog_test_database_connection', arguments: { erp: 'alpha7', host: '10.0.0.9', database: 'alpha7', user: 'leitura', password: 'x', cnpj: '11222333000181', sourceUnitId: 1 } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(parse(result), { success: false, message: 'Conexão recusada. Verifique host, porta e firewall.', latencyMs: null, businessUnit: null });
+});
+
 test('endpoint HTTP fica desligado sem chave e recusa chave errada', async (t) => {
   const services = { getDeployment: async () => deployment() };
   const listen = (environment) => new Promise((resolve) => {

@@ -71,7 +71,14 @@ export function createCatalogMcpServer(services) {
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
   }, async ({ erp, host, port, database, user, password, ssl, cnpj, sourceUnitId }) => {
-    const result = await services.testDatabaseConnection({ driver: erp === 'automatiza' ? 'mysql' : 'postgres', host, port: port ?? (erp === 'automatiza' ? 3306 : 5432), database, user, password, ssl: Boolean(ssl), cnpj, sourceUnitId });
+    // The connection test throws a readable message when the server can't be reached; that's a result, not bad input.
+    let result;
+    try {
+      result = await services.testDatabaseConnection({ driver: erp === 'automatiza' ? 'mysql' : 'postgres', host, port: port ?? (erp === 'automatiza' ? 3306 : 5432), database, user, password, ssl: Boolean(ssl), cnpj, sourceUnitId });
+    } catch (error) {
+      if (error instanceof DeploymentError) throw error;
+      return { success: false, message: error?.message || 'Não foi possível conectar ao banco.', latencyMs: null, businessUnit: null };
+    }
     return { success: result.success, message: result.message, latencyMs: result.latencyMs, businessUnit: result.businessUnitLookup ?? null };
   });
 
