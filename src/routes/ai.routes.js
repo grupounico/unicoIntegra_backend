@@ -1,8 +1,11 @@
 import { Router } from 'express';
 
 import * as aiController from '../controllers/ia.controller.js';
+import attendanceReportsRoutes from '../modules/attendance-reports/routes.js';
 
 const router = Router();
+
+router.use('/attendance-reports', attendanceReportsRoutes);
 
 router.options('/create-ai/alpha', (req, res) => {
   res.sendStatus(204);
