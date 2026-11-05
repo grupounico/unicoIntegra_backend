@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createCatalogMcpServer } from './tools.js';
+import { prisma } from '../../../prisma/PrismaClient.js';
 
 function sameSecret(provided, expected) {
   const a = crypto.createHash('sha256').update(String(provided)).digest();
@@ -11,12 +12,21 @@ function sameSecret(provided, expected) {
 
 // Dedicated key: the endpoint stays off until CATALOG_MCP_API_KEY is configured.
 export function catalogMcpAuth({ environment = process.env } = {}) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const expected = environment.CATALOG_MCP_API_KEY;
     if (!expected || expected.length < 32) return res.status(503).json({ code: 'CATALOG_MCP_DISABLED', message: 'MCP do catálogo desativado. Configure CATALOG_MCP_API_KEY (mínimo de 32 caracteres).' });
     const bearer = /^Bearer (.+)$/i.exec(req.headers.authorization || '')?.[1];
     const provided = bearer || req.headers['x-api-key'];
-    if (!provided || !sameSecret(provided, expected)) return res.status(401).json({ code: 'CATALOG_MCP_UNAUTHORIZED', message: 'Chave de acesso ao MCP inválida.' });
+    if (provided) {
+      const secretHash = crypto.createHash('sha256').update(provided).digest('hex');
+      const credential = await prisma.mcpCredential.findUnique({ where: { secretHash } }).catch(() => null);
+      if (credential && !credential.revokedAt && credential.expiresAt > new Date()) {
+        await prisma.mcpCredential.update({ where: { id: credential.id }, data: { lastUsedAt: new Date() } });
+        req.mcpCredential = credential;
+        return next();
+      }
+    }
+    if (!provided || !sameSecret(provided, expected)) return res.status(401).json({ code: 'CATALOG_MCP_UNAUTHORIZED', message: 'Chave de acesso ao MCP inválida ou expirada.' });
     return next();
   };
 }

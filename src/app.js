@@ -20,6 +20,7 @@ import bancoUnicoImportsRoutes from './routes/bancoUnicoImports.routes.js';
 import clientsRoutes from './routes/clients.routes.js';
 import catalogDeploymentRoutes from './modules/catalog-deployment/routes.js';
 import catalogMcpRoutes from './modules/catalog-mcp/index.js';
+import { credentialRouter } from './modules/catalog-mcp/credentials.js';
 import healthRoutes from './routes/health.routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -217,6 +218,8 @@ app.use('/api/extensions', extensionRoutes);
 app.use('/api/banco-unico-imports', bancoUnicoImportsRoutes);
 app.use('/api/clients', clientsRoutes);
 app.use('/api/v1/deployments', catalogDeploymentRoutes);
+app.use('/api/mcp/credentials', credentialRouter);
+app.use('/mcp/integra', catalogMcpRoutes);
 app.use('/mcp/catalogo', catalogMcpRoutes);
 app.use('/api', logsRoutes);
 app.use('/chat', chatRoutes);

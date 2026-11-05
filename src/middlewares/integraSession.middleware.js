@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 // The same fixed authority used by the Integra login page. Never trust a
 // client-provided instance URL, username or a locally decoded token as proof.
 const SESSION_CHECK_URL = 'https://ambientesdetesteunicocontato.atenderbem.com/ivrs/getResumedList';
@@ -30,6 +31,7 @@ export function createIntegraSessionMiddleware({ fetchImpl = fetch, environment 
       // A login page or arbitrary HTTP 200 must never grant access.
       const body = await response.json();
       if (!Array.isArray(body)) throw new Error('Unexpected session response');
+      req.integraOwnerHash = crypto.createHash('sha256').update(authorization).digest('hex');
       return next();
     } catch {
       return res.status(503).json({ code: 'INTEGRA_SESSION_UNAVAILABLE', message: 'Não foi possível validar sua sessão do Integra. Tente novamente; nenhuma alteração foi iniciada.' });

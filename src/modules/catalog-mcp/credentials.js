@@ -1,0 +1,11 @@
+import crypto from 'node:crypto';
+import { Router } from 'express';
+import { prisma } from '../../../prisma/PrismaClient.js';
+import { integraSessionMiddleware } from '../../middlewares/integraSession.middleware.js';
+const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
+const clean = (row) => ({ id: row.id, name: row.name, scopes: row.scopes, expiresAt: row.expiresAt, revokedAt: row.revokedAt, lastUsedAt: row.lastUsedAt, createdAt: row.createdAt });
+export const credentialRouter = Router();
+credentialRouter.use(integraSessionMiddleware);
+credentialRouter.get('/', async (req,res,next) => { try { res.json((await prisma.mcpCredential.findMany({ where:{ ownerTokenHash:req.integraOwnerHash }, orderBy:{ createdAt:'desc' } })).map(clean)); } catch(e){ next(e); } });
+credentialRouter.post('/', async (req,res,next) => { try { const name=String(req.body?.name||'').trim(); const hours=Number(req.body?.expiresInHours); const scopes=Array.isArray(req.body?.scopes)?req.body.scopes.filter(x=>typeof x==='string'&&x.length<80):[]; if(!name||name.length>120||!Number.isInteger(hours)||hours<1||hours>8760||!scopes.length)return res.status(400).json({code:'INVALID_MCP_CREDENTIAL',message:'Informe nome, escopos e expiração entre 1 hora e 365 dias.'}); const secret=`uim_${crypto.randomBytes(32).toString('base64url')}`; const row=await prisma.mcpCredential.create({data:{ownerTokenHash:req.integraOwnerHash,name,secretHash:hash(secret),scopes,expiresAt:new Date(Date.now()+hours*3600000)}}); res.set('Cache-Control','no-store').status(201).json({...clean(row),secret}); }catch(e){next(e);} });
+credentialRouter.delete('/:id', async (req,res,next) => { try { const result=await prisma.mcpCredential.updateMany({where:{id:req.params.id,ownerTokenHash:req.integraOwnerHash,revokedAt:null},data:{revokedAt:new Date()}}); if(!result.count)return res.status(404).json({code:'MCP_CREDENTIAL_NOT_FOUND',message:'Credencial não encontrada.'}); res.status(204).end(); }catch(e){next(e);} });
