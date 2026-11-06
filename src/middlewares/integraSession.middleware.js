@@ -3,6 +3,22 @@ import crypto from 'node:crypto';
 // client-provided instance URL, username or a locally decoded token as proof.
 const SESSION_CHECK_URL = 'https://ambientesdetesteunicocontato.atenderbem.com/ivrs/getResumedList';
 
+// Reads the user claims of a session token. Only call this AFTER the authority
+// accepted the exact token: the signature is checked there, so the claims are
+// the ones it issued. Returns null for opaque or malformed tokens.
+export function sessionUserFromToken(authorization) {
+  const token = /^Bearer (\S+)$/i.exec(authorization || '')?.[1];
+  const payload = token?.split('.')[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const id = claims?.id;
+    if (!(Number.isSafeInteger(id) && id > 0) && !(typeof id === 'string' && /^[\w-]{1,64}$/.test(id))) return null;
+    const username = typeof claims.username === 'string' ? claims.username.slice(0, 120) : null;
+    return { id: String(id), username };
+  } catch { return null; }
+}
+
 export function createIntegraSessionMiddleware({ fetchImpl = fetch, environment = process.env } = {}) {
   return async (req, res, next) => {
     res.set('Cache-Control', 'no-store, private');
@@ -32,6 +48,7 @@ export function createIntegraSessionMiddleware({ fetchImpl = fetch, environment 
       const body = await response.json();
       if (!Array.isArray(body)) throw new Error('Unexpected session response');
       req.integraOwnerHash = crypto.createHash('sha256').update(authorization).digest('hex');
+      req.integraUser = sessionUserFromToken(authorization);
       return next();
     } catch {
       return res.status(503).json({ code: 'INTEGRA_SESSION_UNAVAILABLE', message: 'Não foi possível validar sua sessão do Integra. Tente novamente; nenhuma alteração foi iniciada.' });
