@@ -42,3 +42,17 @@ test('legacy API key remains optional and cannot bypass a rejected Bearer sessio
   assert.equal((await check({'x-api-key':'wrong'},undefined,{ADMIN_API_KEY:'legacy'})).status,403);
   assert.equal((await check({'x-api-key':'legacy',authorization:'Bearer bad'},Response.json({}, {status:401}),{ADMIN_API_KEY:'legacy'})).status,401);
 });
+
+const jwt = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.sig`;
+test('exposes the AtenderBem user only after the authority accepts the token', async () => {
+  const run = async (authorization, response) => {
+    const req = { headers: { authorization } };
+    let next = false;
+    await createIntegraSessionMiddleware({ environment: {}, fetchImpl: async () => response })(req, { set() {}, status() { return this; }, json() {} }, () => { next = true; });
+    return { next, user: req.integraUser };
+  };
+  assert.deepEqual(await run(`Bearer ${jwt({ id: 42, username: 'ana' })}`, Response.json([])), { next: true, user: { id: '42', username: 'ana' } });
+  assert.deepEqual(await run(`Bearer ${jwt({ id: 42, username: 'ana' })}`, Response.json({}, { status: 401 })), { next: false, user: undefined });
+  assert.equal((await run('Bearer opaque-token', Response.json([]))).user, null);
+  assert.equal((await run(`Bearer ${jwt({ id: '../x' })}`, Response.json([]))).user, null);
+});

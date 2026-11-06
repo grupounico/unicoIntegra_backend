@@ -116,6 +116,24 @@ model SystemLog {
   @@schema("sistema")
 }
 
+model McpCredential {
+  id            String    @id @default(uuid()) @db.Uuid
+  ownerKey      String    @db.VarChar(120)
+  ownerName     String?   @db.VarChar(120)
+  name          String    @db.VarChar(120)
+  secretHash    String    @unique @db.VarChar(64)
+  scopes        Json
+  expiresAt     DateTime  @db.Timestamp(6)
+  revokedAt     DateTime? @db.Timestamp(6)
+  lastUsedAt    DateTime? @db.Timestamp(6)
+  createdAt     DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([ownerKey, revokedAt])
+  @@index([expiresAt])
+  @@map("mcp_credentials")
+  @@schema("sistema")
+}
+
 model Client {
   id                           Int                   @id @default(autoincrement())
   name                         String                @unique @db.VarChar(255)
