@@ -24,6 +24,19 @@ async function connect(services) {
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return client;
 }
+
+test('escopo de leitura bloqueia criação antes de chamar serviço', async () => {
+  let called = false;
+  const server = createCatalogMcpServer({ startDeployment: async () => { called = true; } }, { id: 'test', scopes: ['catalog:read'] });
+  const client = new Client({ name: 'test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const result = await client.callTool({ name: 'catalog_start_deployment', arguments: { deploymentId: DEPLOYMENT_ID, requestedBy: 'fake', confirm: true } });
+  assert.equal(result.isError, true);
+  assert.equal(parse(result).code, 'MCP_SCOPE_FORBIDDEN');
+  assert.equal(called, false);
+  await client.close();
+});
 const parse = (result) => JSON.parse(result.content[0].text);
 
 test('próxima ação acompanha o fluxo Hub + Banco Único → AtenderBem → IA', () => {
@@ -118,7 +131,7 @@ test('endpoint HTTP fica desligado sem chave e recusa chave errada', async (t) =
 
   const disabled = await listen({});
   t.after(() => disabled.close());
-  assert.equal((await call(disabled, {})).status, 503);
+  assert.equal((await call(disabled, {})).status, 401);
 
   const enabled = await listen({ CATALOG_MCP_API_KEY: KEY });
   t.after(() => enabled.close());

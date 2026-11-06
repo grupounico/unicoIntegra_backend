@@ -10,34 +10,35 @@ function sameSecret(provided, expected) {
   return crypto.timingSafeEqual(a, b);
 }
 
-// Dedicated key: the endpoint stays off until CATALOG_MCP_API_KEY is configured.
-export function catalogMcpAuth({ environment = process.env } = {}) {
+// Two ways in: a per-user token created in the Integra (scoped, expiring,
+// revocable) or the optional static CATALOG_MCP_API_KEY (full access).
+export function catalogMcpAuth({ environment = process.env, database = prisma, now = () => new Date() } = {}) {
   return async (req, res, next) => {
     const expected = environment.CATALOG_MCP_API_KEY;
-    if (!expected || expected.length < 32) return res.status(503).json({ code: 'CATALOG_MCP_DISABLED', message: 'MCP do catálogo desativado. Configure CATALOG_MCP_API_KEY (mínimo de 32 caracteres).' });
     const bearer = /^Bearer (.+)$/i.exec(req.headers.authorization || '')?.[1];
     const provided = bearer || req.headers['x-api-key'];
-    if (provided) {
-      const secretHash = crypto.createHash('sha256').update(provided).digest('hex');
-      const credential = await prisma.mcpCredential.findUnique({ where: { secretHash } }).catch(() => null);
-      if (credential && !credential.revokedAt && credential.expiresAt > new Date()) {
-        await prisma.mcpCredential.update({ where: { id: credential.id }, data: { lastUsedAt: new Date() } });
+    if (provided && String(provided).startsWith('uim_')) {
+      const secretHash = crypto.createHash('sha256').update(String(provided)).digest('hex');
+      const credential = await database.mcpCredential.findUnique({ where: { secretHash } }).catch(() => null);
+      if (credential && !credential.revokedAt && credential.expiresAt > now()) {
+        await database.mcpCredential.update({ where: { id: credential.id }, data: { lastUsedAt: now() } }).catch(() => {});
         req.mcpCredential = credential;
         return next();
       }
+      return res.status(401).json({ code: 'CATALOG_MCP_UNAUTHORIZED', message: 'Token MCP inválido, revogado ou expirado.' });
     }
-    if (!provided || !sameSecret(provided, expected)) return res.status(401).json({ code: 'CATALOG_MCP_UNAUTHORIZED', message: 'Chave de acesso ao MCP inválida ou expirada.' });
+    if (!provided || !expected || expected.length < 32 || !sameSecret(provided, expected)) return res.status(401).json({ code: 'CATALOG_MCP_UNAUTHORIZED', message: 'Chave de acesso ao MCP inválida ou expirada.' });
     return next();
   };
 }
 
 // Stateless Streamable HTTP: a fresh server and transport per request, so any
 // instance behind the load balancer can answer and nothing leaks between calls.
-export function createCatalogMcpRouter({ services, environment = process.env }) {
+export function createCatalogMcpRouter({ services, environment = process.env, database = prisma }) {
   const router = Router();
-  router.use(catalogMcpAuth({ environment }));
+  router.use(catalogMcpAuth({ environment, database }));
   router.post('/', async (req, res) => {
-    const server = createCatalogMcpServer(services);
+    const server = createCatalogMcpServer(services, req.mcpCredential);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     try {

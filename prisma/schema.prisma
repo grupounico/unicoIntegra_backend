@@ -118,7 +118,8 @@ model SystemLog {
 
 model McpCredential {
   id            String    @id @default(uuid()) @db.Uuid
-  ownerTokenHash String   @db.VarChar(64)
+  ownerKey      String    @db.VarChar(120)
+  ownerName     String?   @db.VarChar(120)
   name          String    @db.VarChar(120)
   secretHash    String    @unique @db.VarChar(64)
   scopes        Json
@@ -127,7 +128,7 @@ model McpCredential {
   lastUsedAt    DateTime? @db.Timestamp(6)
   createdAt     DateTime  @default(now()) @db.Timestamp(6)
 
-  @@index([ownerTokenHash, revokedAt])
+  @@index([ownerKey, revokedAt])
   @@index([expiresAt])
   @@map("mcp_credentials")
   @@schema("sistema")

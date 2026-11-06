@@ -34,15 +34,31 @@ function asError(error, context) {
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] };
 }
 
+export function toolScope(name) {
+  if (name === 'catalog_test_database_connection') return 'database:test';
+  if (name === 'catalog_create_ai') return 'ai:create';
+  if (['catalog_workflow_guide', 'catalog_list_deployments', 'catalog_get_deployment'].includes(name)) return 'catalog:read';
+  return 'catalog:write';
+}
+
 // Services are injected so tests can run without the database or external systems.
-export function createCatalogMcpServer(services) {
+export function createCatalogMcpServer(services, credential = null) {
   const server = new McpServer({ name: 'unico-integra-catalogo', version: '1.0.0' }, { instructions: WORKFLOW_GUIDE });
-  const actor = (name) => `${name} (via MCP)`;
+  // History keeps who asked (tool argument) and the token owner who authorized it.
+  const actor = (name) => credential ? `${name} (via MCP, token "${credential.name}" de ${credential.ownerName || credential.ownerKey || credential.id})`.slice(0, 250) : `${name} (via MCP)`;
   const summary = async (deploymentId) => summarizeDeployment(await services.getDeployment(deploymentId));
-  const tool = (name, config, handler) => server.registerTool(name, config, async (args) => {
-    try { return asText(await handler(args)); }
-    catch (error) { return asError(error, { deploymentId: args?.deploymentId, unitId: args?.unitId }); }
-  });
+  const allowed = (name) => !credential || (Array.isArray(credential.scopes) && credential.scopes.includes(toolScope(name)));
+  const forbidden = (name) => ({ ...asText({ code: 'MCP_SCOPE_FORBIDDEN', message: `Credencial sem permissão para esta operação (requer ${toolScope(name)}).` }), isError: true });
+  const tool = (name, config, handler) => {
+    // Out-of-scope tools stay listed but with no input schema, so the client
+    // learns why at once instead of hitting argument validation first.
+    if (!allowed(name)) return server.registerTool(name, { title: config.title, description: `Indisponível para este token: requer a permissão ${toolScope(name)}.` }, async () => forbidden(name));
+    return server.registerTool(name, config, async (args) => {
+      if (!allowed(name)) return forbidden(name);
+      try { return asText(await handler(args)); }
+      catch (error) { return asError(error, { deploymentId: args?.deploymentId, unitId: args?.unitId }); }
+    });
+  };
 
   tool('catalog_workflow_guide', {
     title: 'Guia do fluxo', description: 'Explica as etapas da instalação da IA de catálogo e a ordem das ferramentas.',
